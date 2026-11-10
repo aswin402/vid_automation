@@ -33,7 +33,7 @@ dev-web:
 
 # Install frontend packages & compile Rust workspace
 setup:
-    bun --cwd apps/web install
+    bun install --cwd apps/web
     cargo build -p celestiavid-core
 
 # Run Pure Rust unit + E2E media pipeline tests & TypeScript strict checks

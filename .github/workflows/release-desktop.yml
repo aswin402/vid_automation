@@ -54,7 +54,8 @@ jobs:
           Get-ChildItem "src-tauri/resources"
 
       - name: Install Frontend Dependencies
-        run: bun --cwd apps/web install
+        working-directory: apps/web
+        run: bun install
 
       - name: Build Windows NSIS (.exe) & WiX (.msi) Installers
         shell: pwsh
@@ -122,7 +123,8 @@ jobs:
           chmod +x src-tauri/resources/ffmpeg src-tauri/resources/ffprobe
 
       - name: Install Frontend Dependencies
-        run: bun --cwd apps/web install
+        working-directory: apps/web
+        run: bun install
 
       - name: Build Linux (.deb & .AppImage) Installers
         run: ./apps/web/node_modules/.bin/tauri build --bundles deb,appimage
@@ -168,7 +170,8 @@ jobs:
             src-tauri -> target
 
       - name: Install Frontend Dependencies
-        run: bun --cwd apps/web install
+        working-directory: apps/web
+        run: bun install
 
       - name: Build macOS (.dmg) Installer
         run: ./apps/web/node_modules/.bin/tauri build --bundles dmg
