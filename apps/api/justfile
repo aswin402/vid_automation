@@ -1,0 +1,20 @@
+default:
+    just --list
+
+dev:
+    uv run uvicorn app.main:app --reload --port 8000
+
+start:
+    uv run uvicorn app.main:app --port 8000
+
+migrate:
+    uv run alembic upgrade head
+
+makemigrations msg="New migration":
+    uv run alembic revision --autogenerate -m "{{msg}}"
+
+rollback:
+    uv run alembic downgrade -1
+
+reset-db:
+    uv run alembic downgrade base && uv run alembic upgrade head

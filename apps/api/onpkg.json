@@ -1,0 +1,47 @@
+{
+  "agent_instructions": {
+    "active_skills": [
+      "fastapi.md"
+    ],
+    "docs_directory": "onpkg_docs/"
+  },
+  "architecture": {
+    "entrypoint": "app/main.py",
+    "routing": "app/routes",
+    "models": "app/models",
+    "schemas": "app/schemas",
+    "media_pipeline": "app/media",
+    "workers": "app/workers"
+  },
+  "packages": {
+    "added_by_agent": [
+      "aiosqlite",
+      "httpx",
+      "pillow",
+      "pytest",
+      "pytest-asyncio",
+      "python-multipart"
+    ],
+    "core": [
+      "fastapi",
+      "uvicorn",
+      "sqlalchemy",
+      "asyncpg",
+      "alembic",
+      "pydantic",
+      "pydantic-settings",
+      "structlog"
+    ]
+  },
+  "project": {
+    "name": "vid-automation-api",
+    "package_manager": "uv",
+    "runtime": "python",
+    "stack": "fastapi"
+  },
+  "scripts": {
+    "dev": "uv run uvicorn app.main:app --reload --port 8000",
+    "start": "uv run uvicorn app.main:app --port 8000",
+    "test": "uv run pytest -v"
+  }
+}

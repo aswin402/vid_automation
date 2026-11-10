@@ -1,0 +1,46 @@
+# Python & Backend
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node / Bun / Frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Databases & Local Media Storage
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+uploads/
+apps/api/uploads/
+/tmp/
+
+# Large Sample Videos (exceed GitHub 100MB limit)
+sample/*.mp4
+sample/*.mov
+sample/*.webm
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo

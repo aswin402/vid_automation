@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+*.db
+*.sqlite3
+uploads/*
+!uploads/.gitkeep
+alembic/versions/*.py
+!alembic/versions/.gitkeep
+.DS_Store
