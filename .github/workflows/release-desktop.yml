@@ -10,18 +10,23 @@ permissions:
   contents: write
 
 env:
-  WHISPER_DONT_GENERATE_BINDINGS: "1"
   CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
 jobs:
   build-windows:
     name: Windows x64 (.exe + .msi)
     runs-on: windows-latest
-    env:
-      LIBCLANG_PATH: C:\Program Files\LLVM\bin
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Ensure LLVM libclang for Windows bindgen
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\Program Files\LLVM\bin\libclang.dll")) {
+            choco install llvm -y --no-progress
+          }
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -80,6 +85,8 @@ jobs:
   build-linux:
     name: Linux x64 (.deb + .AppImage)
     runs-on: ubuntu-22.04
+    env:
+      WHISPER_DONT_GENERATE_BINDINGS: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -150,6 +157,8 @@ jobs:
   build-macos:
     name: macOS Apple Silicon (.dmg)
     runs-on: macos-latest
+    env:
+      WHISPER_DONT_GENERATE_BINDINGS: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
