@@ -11,7 +11,7 @@ if [[ "${1:-}" == "--desktop" ]]; then
     exit 1
   fi
   echo "🖥  Launching CelestiaVid Native Desktop App (Tauri v2 + Pure Rust)..."
-  exec "${ROOT_DIR}/apps/web/node_modules/.bin/tauri" dev
+  exec bun "${ROOT_DIR}/apps/web/node_modules/@tauri-apps/cli/tauri.js" dev
 fi
 
 API_PID=""

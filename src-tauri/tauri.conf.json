@@ -4,10 +4,19 @@
   "version": "0.2.0",
   "identifier": "com.celestialabs.celestiavid",
   "build": {
-    "beforeDevCommand": "bun run dev",
+    "beforeDevCommand": {
+      "script": "bun run dev",
+      "cwd": "../apps/web"
+    },
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "bun run build",
-    "frontendDist": "../apps/web/dist"
+    "beforeBuildCommand": {
+      "script": "bun run build",
+      "cwd": "../apps/web"
+    },
+    "frontendDist": "../apps/web/dist",
+    "windows": {
+      "staticVCRuntime": false
+    }
   },
   "app": {
     "windows": [
@@ -43,6 +52,7 @@
     "shortDescription": "AI Branded Video Automation Studio",
     "longDescription": "Turn raw clips into trimmed, color-graded, noise-cleaned, logo-branded, AI-subtitled MP4 videos locally in pure Rust.",
     "windows": {
+      "bundleVCRuntime": true,
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
       },

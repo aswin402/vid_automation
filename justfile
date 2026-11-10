@@ -13,11 +13,11 @@ build-desktop:
         echo "Missing Linux GTK/WebKit2GTK dev headers. Run: just install-linux-deps"; \
         exit 1; \
     fi
-    ./apps/web/node_modules/.bin/tauri build
+    bun apps/web/node_modules/@tauri-apps/cli/tauri.js build
 
 # Install one-time Linux GTK/WebKit2GTK headers required by Tauri v2 on Ubuntu/Debian
 install-linux-deps:
-    sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+    sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev file libfuse2
 
 # Run Pure Rust media server (8000) + React/Vite Studio UI (5173)
 dev:
@@ -29,7 +29,7 @@ dev-rust:
 
 # Run only the React + Vite frontend
 dev-web:
-    bun --cwd apps/web run dev -- --host 0.0.0.0 --port 5173
+    bun run --cwd apps/web dev -- --host 0.0.0.0 --port 5173
 
 # Install frontend packages & compile Rust workspace
 setup:

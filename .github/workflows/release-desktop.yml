@@ -59,7 +59,7 @@ jobs:
 
       - name: Build Windows NSIS (.exe) & WiX (.msi) Installers
         shell: pwsh
-        run: .\apps\web\node_modules\.bin\tauri.cmd build --bundles nsis,msi
+        run: bun apps/web/node_modules/@tauri-apps/cli/tauri.js build --bundles nsis,msi
 
       - name: Upload Windows Installer Artifacts
         uses: actions/upload-artifact@v4
@@ -93,6 +93,8 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf \
+            file \
+            libfuse2 \
             clang \
             libclang-dev \
             cmake \
@@ -127,7 +129,7 @@ jobs:
         run: bun install
 
       - name: Build Linux (.deb & .AppImage) Installers
-        run: ./apps/web/node_modules/.bin/tauri build --bundles deb,appimage
+        run: bun apps/web/node_modules/@tauri-apps/cli/tauri.js build --bundles deb,appimage
 
       - name: Upload Linux Installer Artifacts
         uses: actions/upload-artifact@v4
@@ -174,7 +176,7 @@ jobs:
         run: bun install
 
       - name: Build macOS (.dmg) Installer
-        run: ./apps/web/node_modules/.bin/tauri build --bundles dmg
+        run: bun apps/web/node_modules/@tauri-apps/cli/tauri.js build --bundles dmg
 
       - name: Upload macOS Installer Artifact
         uses: actions/upload-artifact@v4
