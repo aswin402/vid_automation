@@ -39,11 +39,30 @@ Single-binary **Tauri v2 + Pure Native Rust** desktop studio and asynchronous FF
 
 ## 🚀 Quick Start
 
-### Download Prebuilt Desktop Installers (Windows, Linux, macOS)
+### 1. Single-Command Terminal / CMD Install (Recommended)
+
+- **Linux & macOS Terminal (`bash` / `zsh`)**:
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/aswin402/vid_automation/main/install.sh | bash
+  ```
+  *(Automatically installs `.deb` on Ubuntu/Debian, `.AppImage` to `~/.local/bin/celestiavid` on other Linux distros, or `.dmg` to `/Applications/CelestiaVid.app` on macOS.)*
+
+- **Windows PowerShell**:
+  ```powershell
+  irm https://raw.githubusercontent.com/aswin402/vid_automation/main/install.ps1 | iex
+  ```
+
+- **Windows Command Prompt (`cmd.exe`)**:
+  ```cmd
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/aswin402/vid_automation/main/install.ps1 | iex"
+  ```
+  *(Silently downloads & installs the per-user NSIS setup with `ffmpeg.exe` & `ffprobe.exe` pre-bundled — no Admin prompt required — and registers `CelestiaVid` in your Start Menu and User `PATH`.)*
+
+### 2. Direct Download — Prebuilt Desktop Installers (Windows, Linux, macOS)
 Every tagged release (`v0.2.0+`) automatically builds standalone desktop installers via [`.github/workflows/release-desktop.yml`](.github/workflows/release-desktop.yml) and publishes them on [**GitHub Releases**](https://github.com/aswin402/vid_automation/releases):
 - **Windows 10 / 11 (x64)**: `CelestiaVid_0.2.0_x64-setup.exe` (NSIS per-user installer — no Admin required) & `CelestiaVid_0.2.0_x64_en-US.msi` — **includes `ffmpeg.exe` & `ffprobe.exe` pre-bundled out of the box!**
-- **Linux (x64)**: `.deb` & `.AppImage` (with static `ffmpeg` & `ffprobe` bundled)
-- **macOS (Apple Silicon)**: `.dmg`
+- **Linux (x64)**: `CelestiaVid_0.2.0_amd64.deb` & `CelestiaVid_0.2.0_amd64.AppImage` (with static `ffmpeg` & `ffprobe` bundled)
+- **macOS (Apple Silicon)**: `CelestiaVid_0.2.0_aarch64.dmg`
 
 ### Build From Source — Prerequisites
 - **Rust** (`rustup`, `cargo` 1.80+), **CMake**, **Clang** (`libclang` for `whisper-rs`)

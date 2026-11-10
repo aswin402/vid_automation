@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - In-process `#[tauri::command]` IPC bridge + ephemeral `127.0.0.1:0` loopback media server + native OS Open/Save file dialogs (`@tauri-apps/plugin-dialog`).
   - **Windows 10/11 Native Hardening**: Added `CREATE_NO_WINDOW` (`0x08000000`) subprocess flags so `ffmpeg.exe` / `ffprobe.exe` never flash console windows, `\\?\` extended-length path normalization for `libass`, native Windows fonts (`Segoe UI`, `Arial`, `Verdana`, `Tahoma`), NSIS per-user `.exe` + WiX `.msi` installers, and pre-bundled static `ffmpeg.exe` & `ffprobe.exe`.
   - Added GitHub Actions release pipeline (`.github/workflows/release-desktop.yml`) building **Windows (`.exe` + `.msi`)**, **Linux (`.deb` + `.AppImage`)**, and **macOS (`.dmg`)** installers automatically.
+  - Added **Single-Command Terminal / CMD / PowerShell Installers** (`install.sh`, `install.ps1`, `install.cmd`) for zero-friction one-line installation from Linux/macOS terminals, Windows PowerShell, and Windows Command Prompt (`cmd.exe`).
 
 ### Added — Step 4: Audio Noise Reduction & Voice Clarity System
 - **Studio Audio Enhancement Step (`AudioEnhancementStep.tsx`)**:
