@@ -1,0 +1,11 @@
+{
+  "name": "celestiavid",
+  "version": "0.2.0",
+  "private": true,
+  "scripts": {
+    "dev": "bun --cwd apps/web run dev",
+    "build": "bun --cwd apps/web run build",
+    "lint": "bun --cwd apps/web run lint",
+    "tauri": "./apps/web/node_modules/.bin/tauri"
+  }
+}

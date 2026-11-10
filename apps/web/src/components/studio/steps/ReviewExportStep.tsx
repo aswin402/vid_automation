@@ -9,13 +9,14 @@ import {
   ArrowLeft,
   Scissors,
   Palette,
+  Volume2,
   Image as ImageIcon,
   Subtitles,
   Film,
   ShieldCheck,
   AlertTriangle,
 } from 'lucide-react';
-import { videoApi } from '@/api/videoApi';
+import { extractApiError, videoApi } from '@/api/videoApi';
 import { formatBytes, formatFriendlyDuration, formatTimecode } from '@/lib/timecode';
 import type {
   Asset,
@@ -90,9 +91,9 @@ export const ReviewExportStep: React.FC<ReviewExportStepProps> = ({
       const resolvedSubVersion = await onFlushBeforeExport();
       await videoApi.startExport(projectId, resolvedSubVersion || subtitleVersion || null);
       onJobUpdated();
-    } catch (err: any) {
+    } catch (err: unknown) {
       setError(
-        err?.response?.data?.message || 'Failed to submit export job. Please verify settings.'
+        extractApiError(err, 'Failed to submit export job. Please verify settings.')
       );
     } finally {
       setSubmitting(false);
@@ -113,8 +114,7 @@ export const ReviewExportStep: React.FC<ReviewExportStepProps> = ({
 
   const handleDownloadOutput = async () => {
     if (!outputAsset) return;
-    const { download_url } = await videoApi.getSignedDownloadUrl(outputAsset.id);
-    window.open(download_url, '_blank', 'noopener,noreferrer');
+    await videoApi.downloadOutputAsset(outputAsset.id, outputAsset.original_filename);
   };
 
   const currentStageIndex = latestExportJob
@@ -125,7 +125,7 @@ export const ReviewExportStep: React.FC<ReviewExportStepProps> = ({
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border pb-4">
         <div>
-          <h2 className="text-lg font-bold">Step 7: Review Settings & Export MP4</h2>
+          <h2 className="text-lg font-bold">Step 8: Review Settings & Export MP4</h2>
           <p className="text-xs text-muted-foreground">
             Confirm your workflow configuration and launch an asynchronous FFmpeg export job.
           </p>
@@ -171,7 +171,7 @@ export const ReviewExportStep: React.FC<ReviewExportStepProps> = ({
       )}
 
       {/* Configuration Summary Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         <div className="rounded-2xl bg-card/70 border border-border p-4 space-y-2">
           <div className="flex items-center gap-2 text-xs font-semibold text-indigo-400">
             <Scissors className="h-4 w-4" />
@@ -231,8 +231,42 @@ export const ReviewExportStep: React.FC<ReviewExportStepProps> = ({
 
         <div className="rounded-2xl bg-card/70 border border-border p-4 space-y-2">
           <div className="flex items-center gap-2 text-xs font-semibold text-indigo-400">
+            <Volume2 className="h-4 w-4" />
+            3. Audio Noise Reduction
+          </div>
+          <div className="text-xs space-y-1 text-muted-foreground">
+            <p className="text-foreground font-medium">
+              {settings.audio_enhancement?.enabled
+                ? `Enabled (${settings.audio_enhancement.preset})`
+                : 'Original Audio (Bypassed)'}
+            </p>
+            {settings.audio_enhancement?.enabled && (
+              <>
+                <p>
+                  FFT Denoise / Clarity:{' '}
+                  <span className="font-mono text-foreground">
+                    {Math.round(settings.audio_enhancement.noise_reduction * 100)}% ·{' '}
+                    {Math.round(settings.audio_enhancement.voice_clarity * 100)}%
+                  </span>
+                </p>
+                <p>
+                  Bandpass / Gain:{' '}
+                  <span className="font-mono text-foreground">
+                    {settings.audio_enhancement.highpass_hz}Hz–
+                    {(settings.audio_enhancement.lowpass_hz / 1000).toFixed(1)}kHz ·{' '}
+                    {settings.audio_enhancement.volume_db >= 0 ? '+' : ''}
+                    {settings.audio_enhancement.volume_db.toFixed(1)}dB
+                  </span>
+                </p>
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-2xl bg-card/70 border border-border p-4 space-y-2">
+          <div className="flex items-center gap-2 text-xs font-semibold text-indigo-400">
             <ImageIcon className="h-4 w-4" />
-            3. Brand Logo Overlay
+            4. Brand Logo Overlay
           </div>
           <div className="text-xs space-y-1 text-muted-foreground">
             <p className="text-foreground font-medium">
@@ -263,7 +297,7 @@ export const ReviewExportStep: React.FC<ReviewExportStepProps> = ({
         <div className="rounded-2xl bg-card/70 border border-border p-4 space-y-2">
           <div className="flex items-center gap-2 text-xs font-semibold text-indigo-400">
             <Subtitles className="h-4 w-4" />
-            4. AI Subtitles (ASS)
+            5. AI Subtitles (ASS)
           </div>
           <div className="text-xs space-y-1 text-muted-foreground">
             <p className="text-foreground font-medium">
@@ -294,7 +328,7 @@ export const ReviewExportStep: React.FC<ReviewExportStepProps> = ({
         <div className="rounded-2xl bg-card/70 border border-border p-4 space-y-2">
           <div className="flex items-center gap-2 text-xs font-semibold text-indigo-400">
             <Film className="h-4 w-4" />
-            5. Outro & Final Output
+            6. Outro & Final Output
           </div>
           <div className="text-xs space-y-1 text-muted-foreground">
             <p className="text-foreground font-medium">
@@ -444,6 +478,7 @@ export const ReviewExportStep: React.FC<ReviewExportStepProps> = ({
               <div className="lg:col-span-7">
                 <video
                   src={outputAsset.stream_url}
+                  crossOrigin="anonymous"
                   controls
                   playsInline
                   className="w-full max-h-[380px] rounded-xl bg-black border border-emerald-500/40 shadow-lg object-contain"

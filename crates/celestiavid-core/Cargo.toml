@@ -1,0 +1,42 @@
+[package]
+name = "celestiavid-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure Rust media pipeline, SQLite persistence, Whisper STT, and HTTP range streamer for CelestiaVid Desktop"
+
+[[bin]]
+name = "celestiavid-server"
+path = "src/bin/celestiavid_server.rs"
+
+[features]
+default = ["whisper-cpp"]
+whisper-cpp = ["dep:whisper-rs"]
+
+[dependencies]
+anyhow = "1.0"
+axum = { version = "0.8", features = ["multipart"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6.0"
+ffmpeg-sidecar = "2.1"
+futures-util = "0.3"
+hex = "0.4"
+hmac = "0.12"
+hound = "3.5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+parking_lot = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+tokio = { version = "1.42", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.11", features = ["v4", "serde"] }
+whisper-rs = { version = "0.13", optional = true }
+
+[dev-dependencies]
+tempfile = "3.14"

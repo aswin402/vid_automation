@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/celestiavid-core",
+]
+exclude = [
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+authors = ["CelestiaLabs"]

@@ -11,7 +11,7 @@ import {
   ArrowRight,
   Loader2,
 } from 'lucide-react';
-import { videoApi } from '@/api/videoApi';
+import { extractApiError, isTauriDesktop, videoApi } from '@/api/videoApi';
 import { formatBytes, formatFriendlyDuration } from '@/lib/timecode';
 import type { Asset } from '@/types/video';
 
@@ -60,16 +60,43 @@ const AssetDropCard: React.FC<DropCardProps> = ({
         setProgress(pct);
       });
       onUploaded();
-    } catch (err: any) {
-      const msg =
-        err?.response?.data?.message ||
-        err?.response?.data?.detail ||
-        'Upload or media verification failed. Please check the file format.';
-      setError(msg);
+    } catch (err: unknown) {
+      setError(
+        extractApiError(
+          err,
+          'Upload or media verification failed. Please check the file format.'
+        )
+      );
     } finally {
       setUploading(false);
       setProgress(0);
     }
+  };
+
+  const handleSelectClick = async () => {
+    if (isTauriDesktop()) {
+      setError(null);
+      setUploading(true);
+      setProgress(35);
+      try {
+        const imported = await videoApi.pickAndImportLocalAsset(projectId, kind);
+        if (imported) {
+          onUploaded();
+        }
+      } catch (err: unknown) {
+        setError(
+          extractApiError(
+            err,
+            'Media inspection failed. Please select a valid video or image file.'
+          )
+        );
+      } finally {
+        setUploading(false);
+        setProgress(0);
+      }
+      return;
+    }
+    inputRef.current?.click();
   };
 
   const handleDelete = async () => {
@@ -240,7 +267,7 @@ const AssetDropCard: React.FC<DropCardProps> = ({
         <button
           type="button"
           disabled={uploading}
-          onClick={() => inputRef.current?.click()}
+          onClick={handleSelectClick}
           className="w-full py-2.5 px-4 rounded-xl border border-dashed border-indigo-500/40 hover:border-indigo-500 bg-indigo-500/5 hover:bg-indigo-500/10 text-xs font-semibold text-indigo-300 flex items-center justify-center gap-2 transition-all cursor-pointer"
         >
           <UploadCloud className="h-4 w-4" />

@@ -13,6 +13,7 @@ export type WorkflowStepId =
   | 'upload'
   | 'trim'
   | 'color'
+  | 'audio'
   | 'logo'
   | 'subtitles'
   | 'outro'
@@ -44,6 +45,18 @@ export interface ColorCorrectionSettings {
   tint: number;
   sharpen: number;
   apply_to_outro: boolean;
+}
+
+export interface AudioEnhancementSettings {
+  enabled: boolean;
+  preset: string;
+  noise_reduction: number;
+  voice_clarity: number;
+  highpass_hz: number;
+  lowpass_hz: number;
+  volume_db: number;
+  normalize_loudness: boolean;
+  apply_to_transcription: boolean;
 }
 
 export interface LogoSettings {
@@ -95,6 +108,7 @@ export interface EditSettings {
   trim: TrimSettings;
   output: OutputSettings;
   color_correction: ColorCorrectionSettings;
+  audio_enhancement: AudioEnhancementSettings;
   logo: LogoSettings;
   subtitles: SubtitlesSettings;
   outro: OutroSettings;

@@ -8,7 +8,7 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import { videoApi } from '@/api/videoApi';
+import { isTauriDesktop, videoApi } from '@/api/videoApi';
 import { formatBytes, formatFriendlyDuration } from '@/lib/timecode';
 import type { Asset, EditSettings } from '@/types/video';
 
@@ -57,6 +57,26 @@ export const OutroStep: React.FC<OutroStepProps> = ({
     }
   };
 
+  const handleDesktopPickOutro = async () => {
+    setUploading(true);
+    try {
+      const imported = await videoApi.pickAndImportLocalAsset(projectId, 'outro');
+      if (imported) {
+        onUpdateSettings((prev) => ({
+          ...prev,
+          outro: {
+            ...prev.outro,
+            enabled: true,
+            asset_id: imported.id,
+          },
+        }));
+        onAssetsChanged();
+      }
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const handleContinue = async () => {
     setSaving(true);
     try {
@@ -71,7 +91,7 @@ export const OutroStep: React.FC<OutroStepProps> = ({
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border pb-4">
         <div>
-          <h2 className="text-lg font-bold">Step 6: Outro Attachment (Optional)</h2>
+          <h2 className="text-lg font-bold">Step 7: Outro Attachment (Optional)</h2>
           <p className="text-xs text-muted-foreground">
             Append a standard brand outro after your edited main clip. Automatically normalized to match resolution, frame rate, and audio.
           </p>
@@ -114,6 +134,7 @@ export const OutroStep: React.FC<OutroStepProps> = ({
           {outroAsset?.stream_url ? (
             <video
               src={outroAsset.stream_url}
+              crossOrigin="anonymous"
               controls
               playsInline
               className="w-full max-h-[360px] rounded-xl bg-black border border-border object-contain"
@@ -124,19 +145,31 @@ export const OutroStep: React.FC<OutroStepProps> = ({
               <p className="text-xs text-muted-foreground max-w-sm">
                 No outro video uploaded yet. Upload an MP4 or MOV outro clip to append it after your main segment.
               </p>
-              <label className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold cursor-pointer">
-                <Upload className="h-3.5 w-3.5" />
-                {uploading ? 'Uploading & Probing...' : 'Upload Outro Video'}
-                <input
-                  type="file"
-                  accept="video/mp4,video/quicktime,video/webm"
-                  className="hidden"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) handleUploadOutro(f);
-                  }}
-                />
-              </label>
+              {isTauriDesktop() ? (
+                <button
+                  type="button"
+                  disabled={uploading}
+                  onClick={handleDesktopPickOutro}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold cursor-pointer"
+                >
+                  <Upload className="h-3.5 w-3.5" />
+                  {uploading ? 'Importing & Probing...' : 'Select Outro Video'}
+                </button>
+              ) : (
+                <label className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold cursor-pointer">
+                  <Upload className="h-3.5 w-3.5" />
+                  {uploading ? 'Uploading & Probing...' : 'Upload Outro Video'}
+                  <input
+                    type="file"
+                    accept="video/mp4,video/quicktime,video/webm"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) handleUploadOutro(f);
+                    }}
+                  />
+                </label>
+              )}
             </div>
           )}
         </div>

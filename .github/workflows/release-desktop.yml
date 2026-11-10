@@ -1,0 +1,186 @@
+name: Build & Release Desktop Installers (Windows, Linux, macOS)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  WHISPER_DONT_GENERATE_BINDINGS: "1"
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+jobs:
+  build-windows:
+    name: Windows x64 (.exe + .msi)
+    runs-on: windows-latest
+    env:
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust stable (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust Cargo Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            src-tauri -> target
+
+      - name: Bundle static FFmpeg & FFprobe for Windows
+        shell: pwsh
+        run: |
+          $zipPath = "$env:TEMP\ffmpeg-win64.zip"
+          $extractDir = "$env:TEMP\ffmpeg-extracted"
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+          $ffmpegExe = Get-ChildItem -Path $extractDir -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+          $ffprobeExe = Get-ChildItem -Path $extractDir -Recurse -Filter "ffprobe.exe" | Select-Object -First 1
+          Copy-Item $ffmpegExe.FullName -Destination "src-tauri/resources/ffmpeg.exe" -Force
+          Copy-Item $ffprobeExe.FullName -Destination "src-tauri/resources/ffprobe.exe" -Force
+          Get-ChildItem "src-tauri/resources"
+
+      - name: Install Frontend Dependencies
+        run: bun --cwd apps/web install
+
+      - name: Build Windows NSIS (.exe) & WiX (.msi) Installers
+        shell: pwsh
+        run: .\apps\web\node_modules\.bin\tauri.cmd build --bundles nsis,msi
+
+      - name: Upload Windows Installer Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CelestiaVid-Windows-x64-Installers
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+
+      - name: Publish Windows Installers to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+
+  build-linux:
+    name: Linux x64 (.deb + .AppImage)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux GTK, WebKit2GTK & Clang Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            clang \
+            libclang-dev \
+            cmake \
+            xz-utils
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cargo Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            src-tauri -> target
+
+      - name: Bundle static FFmpeg & FFprobe for Linux
+        run: |
+          curl -L "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz" -o /tmp/ffmpeg-linux.tar.xz
+          mkdir -p /tmp/ffmpeg-linux
+          tar -xf /tmp/ffmpeg-linux.tar.xz -C /tmp/ffmpeg-linux
+          cp "$(find /tmp/ffmpeg-linux -type f -name ffmpeg | head -n 1)" src-tauri/resources/ffmpeg
+          cp "$(find /tmp/ffmpeg-linux -type f -name ffprobe | head -n 1)" src-tauri/resources/ffprobe
+          chmod +x src-tauri/resources/ffmpeg src-tauri/resources/ffprobe
+
+      - name: Install Frontend Dependencies
+        run: bun --cwd apps/web install
+
+      - name: Build Linux (.deb & .AppImage) Installers
+        run: ./apps/web/node_modules/.bin/tauri build --bundles deb,appimage
+
+      - name: Upload Linux Installer Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CelestiaVid-Linux-x64-Installers
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage
+
+      - name: Publish Linux Installers to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage
+
+  build-macos:
+    name: macOS Apple Silicon (.dmg)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Rust Cargo Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            src-tauri -> target
+
+      - name: Install Frontend Dependencies
+        run: bun --cwd apps/web install
+
+      - name: Build macOS (.dmg) Installer
+        run: ./apps/web/node_modules/.bin/tauri build --bundles dmg
+
+      - name: Upload macOS Installer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CelestiaVid-macOS-arm64-Installer
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+
+      - name: Publish macOS Installer to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: src-tauri/target/release/bundle/dmg/*.dmg

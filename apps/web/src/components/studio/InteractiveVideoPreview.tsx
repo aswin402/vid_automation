@@ -19,6 +19,87 @@ interface InteractiveVideoPreviewProps {
   onDragLogo?: (xRatio: number, yRatio: number) => void;
   onDragSubtitle?: (xRatio: number, yRatio: number) => void;
   bypassColorCorrection?: boolean;
+  bypassAudioEnhancement?: boolean;
+}
+
+interface WebAudioFilterGraph {
+  ctx: AudioContext;
+  source: MediaElementAudioSourceNode;
+  highpass: BiquadFilterNode;
+  lowpass: BiquadFilterNode;
+  rumbleAtten: BiquadFilterNode;
+  hissAtten: BiquadFilterNode;
+  voiceClarity: BiquadFilterNode;
+  compressor: DynamicsCompressorNode;
+  outputGain: GainNode;
+}
+
+const mediaAudioGraphMap = new WeakMap<HTMLVideoElement, WebAudioFilterGraph>();
+
+function getOrCreateAudioGraph(videoEl: HTMLVideoElement): WebAudioFilterGraph | null {
+  const existing = mediaAudioGraphMap.get(videoEl);
+  if (existing) return existing;
+  try {
+    const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtx) return null;
+    const ctx = new AudioCtx();
+    const source = ctx.createMediaElementSource(videoEl);
+
+    const highpass = ctx.createBiquadFilter();
+    highpass.type = 'highpass';
+    highpass.Q.value = 0.707;
+
+    const lowpass = ctx.createBiquadFilter();
+    lowpass.type = 'lowpass';
+    lowpass.Q.value = 0.707;
+
+    const rumbleAtten = ctx.createBiquadFilter();
+    rumbleAtten.type = 'peaking';
+    rumbleAtten.frequency.value = 210;
+    rumbleAtten.Q.value = 0.9;
+
+    const hissAtten = ctx.createBiquadFilter();
+    hissAtten.type = 'highshelf';
+    hissAtten.frequency.value = 5200;
+
+    const voiceClarity = ctx.createBiquadFilter();
+    voiceClarity.type = 'peaking';
+    voiceClarity.frequency.value = 3000;
+    voiceClarity.Q.value = 1.2;
+
+    const compressor = ctx.createDynamicsCompressor();
+    compressor.knee.value = 12;
+    compressor.attack.value = 0.015;
+    compressor.release.value = 0.18;
+
+    const outputGain = ctx.createGain();
+
+    source
+      .connect(highpass)
+      .connect(lowpass)
+      .connect(rumbleAtten)
+      .connect(hissAtten)
+      .connect(voiceClarity)
+      .connect(compressor)
+      .connect(outputGain)
+      .connect(ctx.destination);
+
+    const graph: WebAudioFilterGraph = {
+      ctx,
+      source,
+      highpass,
+      lowpass,
+      rumbleAtten,
+      hissAtten,
+      voiceClarity,
+      compressor,
+      outputGain,
+    };
+    mediaAudioGraphMap.set(videoEl, graph);
+    return graph;
+  } catch {
+    return null;
+  }
 }
 
 const ANCHOR_VECTORS: Record<AnchorPosition, readonly [number, number]> = {
@@ -112,6 +193,7 @@ export const InteractiveVideoPreview: React.FC<InteractiveVideoPreviewProps> = (
   onDragLogo,
   onDragSubtitle,
   bypassColorCorrection = false,
+  bypassAudioEnhancement = false,
 }) => {
   const rawFilterId = useId();
   const svgFilterId = `cc-grade-${rawFilterId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
@@ -200,6 +282,10 @@ export const InteractiveVideoPreview: React.FC<InteractiveVideoPreviewProps> = (
     const vid = videoRef.current;
     if (!vid) return;
     if (vid.paused) {
+      const existingGraph = mediaAudioGraphMap.get(vid);
+      if (existingGraph && existingGraph.ctx.state === 'suspended') {
+        existingGraph.ctx.resume().catch(() => {});
+      }
       const absMs = vid.currentTime * 1000;
       if (absMs < trimStartMs || absMs >= trimEndMs - 100) {
         vid.currentTime = trimStartMs / 1000;
@@ -268,6 +354,58 @@ export const InteractiveVideoPreview: React.FC<InteractiveVideoPreviewProps> = (
   const subCfg = settings.subtitles;
   const styleCfg = subCfg.style;
   const colorCfg = settings.color_correction;
+  const audioCfg = settings.audio_enhancement;
+
+  // Synchronize real-time Web Audio API noise reduction & voice enhancement nodes
+  useEffect(() => {
+    const vid = videoRef.current;
+    if (!vid) return;
+
+    const isAudioActive = Boolean(audioCfg?.enabled && !bypassAudioEnhancement);
+    const existingGraph = mediaAudioGraphMap.get(vid);
+    if (!isAudioActive && !existingGraph) return;
+
+    const graph = existingGraph || getOrCreateAudioGraph(vid);
+    if (!graph) return;
+
+    if (isPlaying && graph.ctx.state === 'suspended') {
+      graph.ctx.resume().catch(() => {});
+    }
+
+    const nr = isAudioActive ? Math.min(Math.max(audioCfg?.noise_reduction ?? 0, 0), 1) : 0;
+    const clarity = isAudioActive ? Math.min(Math.max(audioCfg?.voice_clarity ?? 0, 0), 1) : 0;
+    const hpHz = isAudioActive ? Math.min(Math.max(audioCfg?.highpass_hz ?? 80, 20), 300) : 20;
+    const lpHz = isAudioActive ? Math.min(Math.max(audioCfg?.lowpass_hz ?? 16000, 4000), 20000) : 20000;
+    const volDb = isAudioActive ? Math.min(Math.max(audioCfg?.volume_db ?? 0, -12), 12) : 0;
+    const normLoudness = isAudioActive && Boolean(audioCfg?.normalize_loudness);
+
+    graph.highpass.frequency.value = hpHz;
+    graph.lowpass.frequency.value = lpHz;
+    graph.rumbleAtten.gain.value = -nr * 5.0;
+    graph.hissAtten.gain.value = -nr * 9.5;
+    graph.voiceClarity.gain.value = clarity * 6.5;
+
+    if (normLoudness) {
+      graph.compressor.threshold.value = -18;
+      graph.compressor.ratio.value = 2.5;
+    } else {
+      graph.compressor.threshold.value = 0;
+      graph.compressor.ratio.value = 1.0;
+    }
+
+    const makeupDb = normLoudness ? 2.0 : 0.0;
+    graph.outputGain.gain.value = Math.pow(10, (volDb + makeupDb) / 20);
+  }, [
+    audioCfg?.enabled,
+    audioCfg?.noise_reduction,
+    audioCfg?.voice_clarity,
+    audioCfg?.highpass_hz,
+    audioCfg?.lowpass_hz,
+    audioCfg?.volume_db,
+    audioCfg?.normalize_loudness,
+    bypassAudioEnhancement,
+    isPlaying,
+  ]);
 
   // Compute 1:1 color correction filter matching backend `build_color_correction_filter` in `pipeline.py`
   const isColorActive = Boolean(colorCfg?.enabled && !bypassColorCorrection);
@@ -368,6 +506,7 @@ export const InteractiveVideoPreview: React.FC<InteractiveVideoPreviewProps> = (
             <video
               ref={videoRef}
               src={sourceAsset.stream_url}
+              crossOrigin="anonymous"
               style={{ filter: videoCssFilter }}
               className="w-full h-full object-fill block"
               playsInline

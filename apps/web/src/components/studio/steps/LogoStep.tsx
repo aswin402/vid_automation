@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 import { InteractiveVideoPreview } from '../InteractiveVideoPreview';
 import { PositionGridPicker } from '../PositionGridPicker';
-import { videoApi } from '@/api/videoApi';
+import { isTauriDesktop, videoApi } from '@/api/videoApi';
 import type { AnchorPosition, Asset, EditSettings, SubtitleCue } from '@/types/video';
 
 interface LogoStepProps {
@@ -104,6 +104,26 @@ export const LogoStep: React.FC<LogoStepProps> = ({
     }
   };
 
+  const handleDesktopPickLogo = async () => {
+    setUploadingLogo(true);
+    try {
+      const imported = await videoApi.pickAndImportLocalAsset(projectId, 'logo');
+      if (imported) {
+        onUpdateSettings((prev) => ({
+          ...prev,
+          logo: {
+            ...prev.logo,
+            enabled: true,
+            asset_id: imported.id,
+          },
+        }));
+        onAssetsChanged();
+      }
+    } finally {
+      setUploadingLogo(false);
+    }
+  };
+
   const handleContinue = async () => {
     setSaving(true);
     try {
@@ -118,7 +138,7 @@ export const LogoStep: React.FC<LogoStepProps> = ({
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border pb-4">
         <div>
-          <h2 className="text-lg font-bold">Step 4: Brand Logo Overlay (Optional)</h2>
+          <h2 className="text-lg font-bold">Step 5: Brand Logo Overlay (Optional)</h2>
           <p className="text-xs text-muted-foreground">
             Configure logo anchor position, drag placement, normalized scale, and opacity across any output resolution.
           </p>
@@ -202,19 +222,31 @@ export const LogoStep: React.FC<LogoStepProps> = ({
               <p className="text-xs text-muted-foreground">
                 No logo uploaded yet. Upload a transparent PNG, WebP, or JPEG logo to brand your video.
               </p>
-              <label className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold cursor-pointer">
-                <Upload className="h-3.5 w-3.5" />
-                {uploadingLogo ? 'Uploading...' : 'Upload Logo Image'}
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp"
-                  className="hidden"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) handleQuickLogoUpload(f);
-                  }}
-                />
-              </label>
+              {isTauriDesktop() ? (
+                <button
+                  type="button"
+                  disabled={uploadingLogo}
+                  onClick={handleDesktopPickLogo}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold cursor-pointer"
+                >
+                  <Upload className="h-3.5 w-3.5" />
+                  {uploadingLogo ? 'Importing...' : 'Select Logo Image'}
+                </button>
+              ) : (
+                <label className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold cursor-pointer">
+                  <Upload className="h-3.5 w-3.5" />
+                  {uploadingLogo ? 'Uploading...' : 'Upload Logo Image'}
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) handleQuickLogoUpload(f);
+                    }}
+                  />
+                </label>
+              )}
             </div>
           )}
 

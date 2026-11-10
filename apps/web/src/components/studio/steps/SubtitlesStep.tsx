@@ -14,7 +14,7 @@ import {
   Palette,
   Play,
 } from 'lucide-react';
-import { videoApi } from '@/api/videoApi';
+import { extractApiError, videoApi } from '@/api/videoApi';
 import { formatTimecode, parseTimecodeToMs } from '@/lib/timecode';
 import { InteractiveVideoPreview } from '../InteractiveVideoPreview';
 import { PositionGridPicker } from '../PositionGridPicker';
@@ -103,10 +103,12 @@ export const SubtitlesStep: React.FC<SubtitlesStepProps> = ({
         true
       );
       onTranscriptionStarted(job);
-    } catch (err: any) {
+    } catch (err: unknown) {
       setError(
-        err?.response?.data?.message ||
+        extractApiError(
+          err,
           "We couldn't generate subtitles. Your video is safe; try again or continue without subtitles."
+        )
       );
     }
   };
@@ -179,10 +181,8 @@ export const SubtitlesStep: React.FC<SubtitlesStepProps> = ({
       }
       await onSaveSettings();
       if (proceedAfter) onNext();
-    } catch (err: any) {
-      setError(
-        err?.response?.data?.message || 'Failed to save subtitle cues or styling.'
-      );
+    } catch (err: unknown) {
+      setError(extractApiError(err, 'Failed to save subtitle cues or styling.'));
     } finally {
       setSaving(false);
     }
@@ -222,7 +222,7 @@ export const SubtitlesStep: React.FC<SubtitlesStepProps> = ({
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border pb-4">
         <div>
           <h2 className="text-lg font-bold">
-            Step 5: AI Subtitles, Review & Styling (Optional)
+            Step 6: AI Subtitles, Review & Styling (Optional)
           </h2>
           <p className="text-xs text-muted-foreground">
             AI-generated subtitles can contain mistakes. You can review, edit timestamps, and customize ASS styling before export.
@@ -300,14 +300,14 @@ export const SubtitlesStep: React.FC<SubtitlesStepProps> = ({
 
         <div className="flex items-center gap-2.5">
           {subtitleVersion > 0 && cues.length > 0 && (
-            <a
-              href={`/api/v1/projects/${projectId}/subtitle-versions/${subtitleVersion}/srt`}
-              download={`subtitles_v${subtitleVersion}.srt`}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-border hover:bg-muted text-xs font-medium transition-colors"
+            <button
+              type="button"
+              onClick={() => videoApi.downloadSubtitlesSrt(projectId, subtitleVersion)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-border hover:bg-muted text-xs font-medium transition-colors cursor-pointer"
             >
               <Download className="h-3.5 w-3.5" />
               Export .SRT
-            </a>
+            </button>
           )}
 
           <button

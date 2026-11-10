@@ -1,30 +1,47 @@
-# CelestiaVid AI Video Automation Platform — Root Justfile
+# CelestiaVid — Pure Rust + Tauri v2 Desktop Video Studio
 
 default:
     @just --list
 
-# Run both FastAPI backend (8000) and React+Vite frontend (5173) in a single command
+# Launch Native Desktop App in development mode (Tauri v2 + Pure Rust)
+desktop:
+    ./dev.sh --desktop
+
+# Build single-file native Desktop Installers (.deb, .rpm, .AppImage, .msi, .dmg)
+build-desktop:
+    @if [ "$(uname -s)" = "Linux" ] && ! pkg-config --exists webkit2gtk-4.1 2>/dev/null; then \
+        echo "Missing Linux GTK/WebKit2GTK dev headers. Run: just install-linux-deps"; \
+        exit 1; \
+    fi
+    ./apps/web/node_modules/.bin/tauri build
+
+# Install one-time Linux GTK/WebKit2GTK headers required by Tauri v2 on Ubuntu/Debian
+install-linux-deps:
+    sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+# Run Pure Rust media server (8000) + React/Vite Studio UI (5173)
 dev:
     ./dev.sh
 
-# Run only the FastAPI backend server
-dev-api:
-    cd apps/api && uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# Run only the Pure Rust media server
+dev-rust:
+    cargo run -p celestiavid-core --bin celestiavid-server
 
-# Run only the React + Vite frontend server
+# Run only the React + Vite frontend
 dev-web:
-    cd apps/web && bun run dev -- --host 0.0.0.0 --port 5173
+    bun --cwd apps/web run dev -- --host 0.0.0.0 --port 5173
 
-# Install/sync dependencies for both backend and frontend
+# Install frontend packages & compile Rust workspace
 setup:
-    cd apps/api && uv sync
-    cd apps/web && bun install
+    bun --cwd apps/web install
+    cargo build -p celestiavid-core
 
-# Run backend unit & E2E media pipeline tests + frontend TypeScript check
+# Run Pure Rust unit + E2E media pipeline tests & TypeScript strict checks
 test:
-    cd apps/api && uv run pytest -v
+    cargo test -p celestiavid-core
     ./apps/web/node_modules/.bin/tsc -p apps/web/tsconfig.app.json --noEmit
 
-# Build frontend production bundle
+# Build optimized release Rust binary + production frontend bundle
 build:
-    cd apps/web && bun run build
+    cargo build --release -p celestiavid-core
+    ./apps/web/node_modules/.bin/vite build apps/web

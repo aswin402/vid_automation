@@ -89,10 +89,10 @@ export function HomePage() {
             Automated Branded Video Pipeline
           </div>
           <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
-            Turn Raw Clips into Branded, Subtitled Videos in 6 Guided Steps
+            Turn Raw Clips into Branded, Subtitled Videos in 8 Guided Steps
           </h1>
           <p className="text-sm text-muted-foreground">
-            Upload your source video, select a frame-accurate trim window, overlay your transparent brand logo, generate and edit AI subtitles with ASS styling, append a normalized outro, and export an FFprobe-verified MP4.
+            Import your source video locally, select a frame-accurate trim window, apply cinematic color grading and FFT audio noise reduction, overlay your transparent brand logo, generate and edit AI subtitles, append a normalized outro, and export an FFprobe-verified MP4.
           </p>
         </div>
 
@@ -325,11 +325,12 @@ export function HomePage() {
                         <button
                           type="button"
                           onClick={async () => {
-                            const { download_url } =
-                              await videoApi.getSignedDownloadUrl(outAsset.id);
-                            window.open(download_url, '_blank', 'noopener,noreferrer');
+                            await videoApi.downloadOutputAsset(
+                              outAsset.id,
+                              outAsset.original_filename
+                            );
                           }}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 text-xs font-semibold"
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 text-xs font-semibold cursor-pointer"
                         >
                           <Download className="h-3.5 w-3.5" />
                           MP4

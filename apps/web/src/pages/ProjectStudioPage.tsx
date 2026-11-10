@@ -8,6 +8,7 @@ import { WorkflowStepper } from '@/components/studio/WorkflowStepper';
 import { UploadStep } from '@/components/studio/steps/UploadStep';
 import { TrimStep } from '@/components/studio/steps/TrimStep';
 import { ColorCorrectionStep } from '@/components/studio/steps/ColorCorrectionStep';
+import { AudioEnhancementStep } from '@/components/studio/steps/AudioEnhancementStep';
 import { LogoStep } from '@/components/studio/steps/LogoStep';
 import { SubtitlesStep } from '@/components/studio/steps/SubtitlesStep';
 import { OutroStep } from '@/components/studio/steps/OutroStep';
@@ -223,11 +224,12 @@ export const ProjectStudioPage: React.FC = () => {
         </div>
       </div>
 
-      {/* 7-Step Guided Stepper */}
+      {/* 8-Step Guided Stepper */}
       <WorkflowStepper
         activeStep={activeStep}
         hasSourceVideo={Boolean(sourceAsset)}
         hasColorCorrection={Boolean(draftSettings.color_correction?.enabled)}
+        hasAudioEnhancement={Boolean(draftSettings.audio_enhancement?.enabled)}
         hasLogo={Boolean(logoAsset && draftSettings.logo.enabled)}
         hasSubtitles={Boolean(
           draftSettings.subtitles.enabled && draftCues.length > 0
@@ -277,6 +279,21 @@ export const ProjectStudioPage: React.FC = () => {
             onUpdateSettings={updateDraftSettings}
             onSaveSettings={handleSaveSettings}
             onBack={() => setActiveStep('trim')}
+            onNext={() => setActiveStep('audio')}
+          />
+        )}
+
+        {activeStep === 'audio' && (
+          <AudioEnhancementStep
+            sourceAsset={sourceAsset}
+            logoAsset={logoAsset}
+            settings={draftSettings}
+            cues={draftCues}
+            currentTimeMs={currentTimeMs}
+            onTimeUpdate={setCurrentTimeMs}
+            onUpdateSettings={updateDraftSettings}
+            onSaveSettings={handleSaveSettings}
+            onBack={() => setActiveStep('color')}
             onNext={() => setActiveStep('logo')}
           />
         )}
@@ -293,7 +310,7 @@ export const ProjectStudioPage: React.FC = () => {
             onUpdateSettings={updateDraftSettings}
             onSaveSettings={handleSaveSettings}
             onAssetsChanged={() => refetchProject()}
-            onBack={() => setActiveStep('color')}
+            onBack={() => setActiveStep('audio')}
             onNext={() => setActiveStep('subtitles')}
           />
         )}

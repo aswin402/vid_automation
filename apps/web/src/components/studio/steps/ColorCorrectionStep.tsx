@@ -320,7 +320,7 @@ export const ColorCorrectionStep: React.FC<ColorCorrectionStepProps> = ({
             onClick={handleContinue}
             className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-all shadow-sm"
           >
-            {saving ? 'Saving...' : 'Continue to Logo'}
+            {saving ? 'Saving...' : 'Continue to Audio Clean'}
             <ArrowRight className="h-4 w-4" />
           </button>
         </div>
