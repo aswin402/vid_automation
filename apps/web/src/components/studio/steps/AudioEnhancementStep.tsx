@@ -148,7 +148,7 @@ const AUDIO_SLIDERS: readonly AudioSliderDescriptor[] = [
     step: 0.02,
     defaultValue: 0.0,
     formatDisplay: (v) =>
-      v <= 0.01 ? 'Off (0%)' : `${Math.round(v * 100)}% (-${(6 + v * 36).toFixed(0)} dB)`,
+      v <= 0.01 ? 'Off (0%)' : `${Math.round(v * 100)}% (-${(10 + v * 38).toFixed(0)} dB)`,
   },
   {
     key: 'voice_clarity',
@@ -221,7 +221,7 @@ export const AudioEnhancementStep: React.FC<AudioEnhancementStepProps> = ({
       ...prev,
       audio_enhancement: {
         ...prev.audio_enhancement,
-        enabled: preset.id !== 'neutral' ? true : prev.audio_enhancement?.enabled ?? false,
+        enabled: preset.id !== 'neutral',
         preset: preset.id,
         ...preset.values,
       },

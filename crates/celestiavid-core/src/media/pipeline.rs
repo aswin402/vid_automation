@@ -264,16 +264,31 @@ pub fn build_audio_enhancement_filter(audio_cfg: Option<&AudioEnhancementSetting
         stages.push(format!("lowpass=f={lp_hz}"));
     }
     if nr > 0.01 {
-        let nr_db = 6.0 + nr * 36.0;
-        let nf_db = -50.0 + nr * 24.0;
-        stages.push(format!("afftdn=nr={nr_db:.1}:nf={nf_db:.1}:tn=1"));
+        let nr_db = 10.0 + nr * 38.0;
+        let nf_db = (-34.0 + nr * 14.0).clamp(-80.0, -20.0);
+        let rf_db = (-50.0 - nr * 24.0).clamp(-80.0, -20.0);
+        stages.push(format!(
+            "afftdn=nr={nr_db:.1}:nf={nf_db:.1}:rf={rf_db:.1}:nt=w:tn=0"
+        ));
+
+        // Soft-knee downward RMS expander (`agate`) placed BEFORE vocal EQ and compressor
+        // so residual room hiss during pauses is attenuated instead of boosted by makeup gain.
+        let gate_thresh = (0.008 + nr * 0.016).clamp(0.002, 0.05);
+        let gate_ratio = 2.0 + nr * 3.5;
+        let gate_range = (0.18 - nr * 0.16).clamp(0.015, 0.25);
+        stages.push(format!(
+            "agate=threshold={gate_thresh:.4}:ratio={gate_ratio:.2}:range={gate_range:.4}:knee=4:attack=8:release=240"
+        ));
     }
     if clarity > 0.01 {
         let gain = clarity * 6.5;
         stages.push(format!("equalizer=f=3000:t=q:w=1.2:g={gain:.2}"));
     }
     if a.normalize_loudness {
-        stages.push("acompressor=threshold=-18dB:ratio=2.5:attack=15:release=180:makeup=2dB".into());
+        stages.push(
+            "acompressor=threshold=0.125:ratio=2.2:knee=4:attack=15:release=200:makeup=1.22"
+                .into(),
+        );
     }
     if vol_db.abs() > 0.05 {
         stages.push(format!("volume={vol_db:.2}dB"));
@@ -342,6 +357,15 @@ pub async fn render_main_segment(
     let use_logo = logo_path.map_or(false, |p| p.exists())
         && logo_cfg.map_or(false, |l| l.enabled);
     let use_subs = ass_path.map_or(false, |p| p.exists());
+
+    info!(
+        use_color = use_color,
+        use_audio = use_audio,
+        use_logo = use_logo,
+        use_subs = use_subs,
+        audio_filter = ?audio_filter,
+        "render_main_segment_config"
+    );
 
     if !use_color && !use_audio && !use_logo && !use_subs {
         let args = vec![
@@ -440,6 +464,12 @@ pub async fn render_main_segment(
     }
 
     filter_parts.push(format!("{current_v}format=yuv420p[vout]"));
+    let audio_map = if let Some(af) = audio_filter {
+        filter_parts.push(format!("[0:a:0]{af}[aout]"));
+        "[aout]".to_string()
+    } else {
+        "0:a:0".to_string()
+    };
     let filter_complex = filter_parts.join(";");
 
     let mut args = inputs;
@@ -449,11 +479,8 @@ pub async fn render_main_segment(
         "-map".into(),
         "[vout]".into(),
         "-map".into(),
-        "0:a:0".into(),
+        audio_map,
     ]);
-    if let Some(af) = audio_filter {
-        args.extend(["-af".into(), af]);
-    }
     args.extend([
         "-c:v".into(),
         v_codec,

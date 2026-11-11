@@ -1,4 +1,4 @@
-# CelestiaVid — Native Desktop AI Video Studio (`v0.2.0`)
+# CelestiaVid — Native Desktop AI Video Studio (`v0.2.1`)
 
 Single-binary **Tauri v2 + Pure Native Rust** desktop studio and asynchronous FFmpeg media pipeline that transforms raw local videos into finished, color-graded, noise-cleaned, logo-branded, AI-subtitled MP4 videos — with **zero Python runtime dependencies**.
 
@@ -10,7 +10,7 @@ Single-binary **Tauri v2 + Pure Native Rust** desktop studio and asynchronous FF
    - **1. Import / Upload Assets**: Zero-copy native OS file picker (`file://` in-place inspection without copying multi-GB 4K clips) or drag-and-drop for source videos (`MP4`, `MOV`, `WebM`, `MKV`, `M4V`), transparent brand logos (`PNG`, `WebP`, `JPEG`), and brand outro clips with instant `FFprobe` / Rust `image` stream verification.
    - **2. Trim Clip**: Frame-accurate start/end range trimming (`MM:SS.mmm`) with interactive timeline handles and `-0.5s / +0.5s` nudge controls.
    - **3. Color Grade (Optional)**: Real-time color correction & grading with 7 look presets (*Neutral*, *Natural Boost*, *Warm Cinema*, *Cool Studio*, *Punchy Pop*, *Vintage Matte*, *B&W Noir*), 7 fine-tune sliders (*Brightness*, *Contrast*, *Saturation*, *Gamma*, *Temperature*, *Tint*, *Sharpness*), **Hold to Compare**, and **Apply to Outro**.
-   - **4. Audio Clean & Noise Reduction (Optional)**: Spectral FFT background noise reduction (`afftdn`), low-cut rumble filter (`highpass`), hiss roll-off (`lowpass`), 3 kHz vocal presence boost (`equalizer`), dynamic speech leveling (`acompressor`), output gain (`volume`), **Hold to Compare Original**, and **Pre-clean Audio Before AI Transcription**.
+   - **4. Audio Clean & Noise Reduction (Optional)**: Calibrated spectral FFT background noise reduction (`afftdn`) + soft-knee downward RMS noise-floor expander (`agate`), low-cut rumble filter (`highpass`), hiss roll-off (`lowpass`), 3 kHz vocal presence boost (`equalizer`), dynamic speech leveling (`acompressor`), output gain (`volume`), **Hold to Compare Original**, and **Pre-clean Audio Before AI Transcription**.
    - **5. Brand Logo (Optional)**: 9-point anchor grid or freeform drag-and-drop placement on the video canvas with normalized width and opacity controls.
    - **6. AI Subtitles (Optional)**: Native Rust 3-tier transcription (`whisper-rs` / `whisper.cpp` local GGML neural inference, OpenAI Whisper API, or pure Rust `hound` PCM Acoustic RMS VAD), interactive cue editor with overlap validation, native `.srt` Save dialog, and rich ASS styling.
    - **7. Outro Clip (Optional)**: Automatically normalizes resolution, FPS, pixel aspect ratio, pixel format (`yuv420p`), and stereo audio (`48 kHz`) before seamless concatenation.
@@ -60,9 +60,9 @@ Single-binary **Tauri v2 + Pure Native Rust** desktop studio and asynchronous FF
 
 ### 2. Direct Download — Prebuilt Desktop Installers (Windows, Linux, macOS)
 Every tagged release (`v0.2.0+`) automatically builds standalone desktop installers via [`.github/workflows/release-desktop.yml`](.github/workflows/release-desktop.yml) and publishes them on [**GitHub Releases**](https://github.com/aswin402/vid_automation/releases):
-- **Windows 10 / 11 (x64)**: `CelestiaVid_0.2.0_x64-setup.exe` (NSIS per-user installer — no Admin required) & `CelestiaVid_0.2.0_x64_en-US.msi` — **includes `ffmpeg.exe` & `ffprobe.exe` pre-bundled out of the box!**
-- **Linux (x64)**: `CelestiaVid_0.2.0_amd64.deb` & `CelestiaVid_0.2.0_amd64.AppImage` (with static `ffmpeg` & `ffprobe` bundled)
-- **macOS (Apple Silicon)**: `CelestiaVid_0.2.0_aarch64.dmg`
+- **Windows 10 / 11 (x64)**: `CelestiaVid_0.2.1_x64-setup.exe` (NSIS per-user installer — no Admin required) & `CelestiaVid_0.2.1_x64_en-US.msi` — **includes `ffmpeg.exe` & `ffprobe.exe` pre-bundled out of the box!**
+- **Linux (x64)**: `CelestiaVid_0.2.1_amd64.deb` & `CelestiaVid_0.2.1_amd64.AppImage` (with static `ffmpeg` & `ffprobe` bundled)
+- **macOS (Apple Silicon)**: `CelestiaVid_0.2.1_aarch64.dmg`
 
 ### Build From Source — Prerequisites
 - **Rust** (`rustup`, `cargo` 1.80+), **CMake**, **Clang** (`libclang` for `whisper-rs`)
@@ -111,4 +111,4 @@ just test
 - [`docs/PRD.md`](docs/PRD.md) — Product Requirements Document
 - [`docs/DESIGN.md`](docs/DESIGN.md) — UI/UX design system & studio layout specification
 - [`docs/TECHNICAL_SPEC.md`](docs/TECHNICAL_SPEC.md) — Media filtergraphs & architecture specification
-- [`CHANGELOG.md`](CHANGELOG.md) — Release history (`v0.2.0`, `v0.0.1`)
+- [`CHANGELOG.md`](CHANGELOG.md) — Release history (`v0.2.1`, `v0.2.0`, `v0.0.1`)

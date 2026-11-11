@@ -24,6 +24,7 @@ export const ProjectStudioPage: React.FC = () => {
     draftCues,
     cuesDirty,
     settingsDirty,
+    settingsRevision,
     currentTimeMs,
     setActiveProjectId,
     setActiveStep,
@@ -71,12 +72,12 @@ export const ProjectStudioPage: React.FC = () => {
     enabled: Boolean(projectId),
   });
 
-  // Initialize draftSettings when project loads
+  // Initialize draftSettings once when project loads (or when server updates while no local draft exists)
   useEffect(() => {
-    if (project?.settings_json && !settingsDirty) {
+    if (project?.settings_json && !draftSettings) {
       setDraftSettings(project.settings_json, false);
     }
-  }, [project?.id, project?.settings_json]);
+  }, [project?.id, project?.settings_json, draftSettings, setDraftSettings]);
 
   // Initialize draftCues when subtitle version loads
   useEffect(() => {
@@ -93,22 +94,24 @@ export const ProjectStudioPage: React.FC = () => {
     }
   }, [latestTranscribeJob?.status, latestTranscribeJob?.subtitle_version]);
 
-  // Auto-save draftSettings after 450ms of inactivity so drag/slider edits are always persisted
+  // Auto-save draftSettings after 450ms of inactivity using revision guard so newer edits are never clobbered
   useEffect(() => {
     if (!settingsDirty || !projectId || !draftSettings) return;
+    const revSnapshot = settingsRevision;
+    const settingsSnapshot = draftSettings;
     const timer = window.setTimeout(async () => {
       try {
         const updated = await videoApi.updateProject(projectId, {
-          settings: draftSettings,
+          settings: settingsSnapshot,
         });
-        markSettingsSaved();
+        markSettingsSaved(revSnapshot);
         queryClient.setQueryData(['project', projectId], updated);
       } catch {
         // Manual save or pre-export flush will retry if network hiccups
       }
     }, 450);
     return () => window.clearTimeout(timer);
-  }, [settingsDirty, projectId, draftSettings, markSettingsSaved, queryClient]);
+  }, [settingsDirty, settingsRevision, projectId, draftSettings, markSettingsSaved, queryClient]);
 
   if (isLoading || !project || !draftSettings) {
     return (
@@ -135,11 +138,12 @@ export const ProjectStudioPage: React.FC = () => {
 
   const handleSaveSettings = async () => {
     if (!projectId || !draftSettings) return;
+    const currentSnapshot = useWorkflowStore.getState().draftSettings || draftSettings;
+    const currentRev = useWorkflowStore.getState().settingsRevision;
     const updated = await videoApi.updateProject(projectId, {
-      settings: draftSettings,
+      settings: currentSnapshot,
     });
-    setDraftSettings(updated.settings_json, false);
-    markSettingsSaved();
+    markSettingsSaved(currentRev);
     queryClient.setQueryData(['project', projectId], updated);
   };
 
@@ -169,12 +173,13 @@ export const ProjectStudioPage: React.FC = () => {
       setDraftCues(saved.cues, false);
       markCuesSaved();
     }
-    if (projectId && draftSettings) {
+    const latestSettings = useWorkflowStore.getState().draftSettings || draftSettings;
+    const latestRev = useWorkflowStore.getState().settingsRevision;
+    if (projectId && latestSettings) {
       const updated = await videoApi.updateProject(projectId, {
-        settings: draftSettings,
+        settings: latestSettings,
       });
-      setDraftSettings(updated.settings_json, false);
-      markSettingsSaved();
+      markSettingsSaved(latestRev);
       queryClient.setQueryData(['project', projectId], updated);
     }
     return resolvedSubVer;

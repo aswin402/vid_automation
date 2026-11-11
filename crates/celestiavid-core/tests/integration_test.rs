@@ -95,6 +95,8 @@ fn test_color_and_audio_filter_builders() {
     assert!(af.contains("highpass=f=100"));
     assert!(af.contains("lowpass=f=13000"));
     assert!(af.contains("afftdn="));
+    assert!(af.contains("tn=0"));
+    assert!(af.contains("agate="));
     assert!(af.contains("equalizer=f=3000"));
     assert!(af.contains("acompressor="));
     assert!(af.contains("volume=2.00dB"));
@@ -275,4 +277,156 @@ async fn test_end_to_end_rust_pipeline_and_range_streaming() {
         .expect("save_asset_to_path");
     assert!(copied > 1024);
     assert!(exported_dest.is_file());
+}
+
+fn measure_wav_window_rms_db(wav_path: &std::path::Path, start_sec: f64, end_sec: f64) -> f64 {
+    let mut reader = hound::WavReader::open(wav_path).expect("open wav");
+    let sr = reader.spec().sample_rate as f64;
+    let start_idx = (start_sec * sr) as usize;
+    let end_idx = (end_sec * sr) as usize;
+    let samples: Vec<i16> = reader.samples::<i16>().map(|s| s.unwrap_or(0)).collect();
+    let slice = &samples[start_idx.min(samples.len())..end_idx.min(samples.len())];
+    assert!(!slice.is_empty());
+    let sum_sq: f64 = slice
+        .iter()
+        .map(|&s| {
+            let norm = (s as f64) / 32768.0;
+            norm * norm
+        })
+        .sum();
+    let rms = (sum_sq / (slice.len() as f64)).sqrt();
+    if rms <= 1e-9 {
+        -180.0
+    } else {
+        20.0 * rms.log10()
+    }
+}
+
+#[tokio::test]
+async fn test_audio_noise_reduction_measurably_lowers_noise_floor() {
+    use celestiavid_core::media::pipeline::run_ffmpeg_command;
+
+    let tmp = TempDir::new().unwrap();
+    let noisy_video = tmp.path().join("noisy_input.mp4");
+
+    // Generate 3.0s video: [0.3..1.4s] speech-band 440Hz tone (-16dB) + continuous white noise (-42dB),
+    // [1.7..2.8s] pure background white noise (-42dB)
+    let gen_args: Vec<String> = vec![
+        "-f".into(),
+        "lavfi".into(),
+        "-i".into(),
+        "color=c=navy:s=320x240:r=24:d=3.0".into(),
+        "-f".into(),
+        "lavfi".into(),
+        "-i".into(),
+        "aevalsrc='0.008*(random(0)*2-1) + if(between(t,0.3,1.4),0.15*sin(2*PI*440*t),0)':s=48000:d=3.0".into(),
+        "-c:v".into(),
+        "libx264".into(),
+        "-preset".into(),
+        "ultrafast".into(),
+        "-pix_fmt".into(),
+        "yuv420p".into(),
+        "-c:a".into(),
+        "aac".into(),
+        "-b:a".into(),
+        "192k".into(),
+        noisy_video.to_string_lossy().into_owned(),
+    ];
+    run_ffmpeg_command(&gen_args, "TEST_GEN", "Failed to generate noisy test clip", 60)
+        .await
+        .expect("generate noisy clip");
+
+    let engine = CelestiaEngine::open(&tmp.path().join("app_data"), None).unwrap();
+    let proj = engine.create_project("Denoise Acoustic Verification").unwrap();
+    engine
+        .import_local_asset(&proj.id, "source", &noisy_video)
+        .await
+        .unwrap();
+
+    // Enable Clean Voice + Color Correction so render_main_segment exercises the full filter_complex path!
+    let mut settings = engine.get_project_detail(&proj.id).unwrap().settings_json;
+    settings.color_correction.enabled = true;
+    settings.color_correction.brightness = 0.05;
+    settings.audio_enhancement.enabled = true;
+    settings.audio_enhancement.preset = "clean_voice".into();
+    settings.audio_enhancement.noise_reduction = 0.50;
+    settings.audio_enhancement.voice_clarity = 0.35;
+    settings.audio_enhancement.highpass_hz = 95;
+    settings.audio_enhancement.lowpass_hz = 14000;
+    settings.audio_enhancement.normalize_loudness = true;
+    settings.audio_enhancement.volume_db = 1.5;
+
+    engine
+        .update_project(
+            &proj.id,
+            ProjectUpdateRequest {
+                name: None,
+                settings: Some(settings),
+            },
+        )
+        .unwrap();
+
+    let exp_job = engine
+        .start_export(
+            &proj.id,
+            ExportCreateRequest {
+                subtitle_version: None,
+                idempotency_key: None,
+            },
+        )
+        .unwrap();
+
+    for _ in 0..100 {
+        let j = engine.get_job(&exp_job.id).unwrap();
+        if j.status == "completed" {
+            break;
+        }
+        assert_ne!(j.status, "failed", "Export failed: {:?}", j.error_message_safe);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let out_id = engine
+        .get_job(&exp_job.id)
+        .unwrap()
+        .output_asset_id
+        .expect("output asset");
+    let exported_mp4 = tmp.path().join("cleaned_output.mp4");
+    engine
+        .save_asset_to_path(&out_id, &exported_mp4)
+        .await
+        .unwrap();
+
+    let raw_wav = tmp.path().join("raw.wav");
+    let cleaned_wav = tmp.path().join("cleaned.wav");
+    for (src, dst) in [(&noisy_video, &raw_wav), (&exported_mp4, &cleaned_wav)] {
+        let args = vec![
+            "-i".into(),
+            src.to_string_lossy().into_owned(),
+            "-vn".into(),
+            "-acodec".into(),
+            "pcm_s16le".into(),
+            "-ar".into(),
+            "16000".into(),
+            "-ac".into(),
+            "1".into(),
+            dst.to_string_lossy().into_owned(),
+        ];
+        run_ffmpeg_command(&args, "WAV_EXTRACT", "Extract PCM", 60)
+            .await
+            .unwrap();
+    }
+
+    let raw_noise_db = measure_wav_window_rms_db(&raw_wav, 1.8, 2.7);
+    let cleaned_noise_db = measure_wav_window_rms_db(&cleaned_wav, 1.8, 2.7);
+    let cleaned_speech_db = measure_wav_window_rms_db(&cleaned_wav, 0.5, 1.2);
+
+    let reduction_db = raw_noise_db - cleaned_noise_db;
+    assert!(
+        reduction_db >= 20.0,
+        "Expected >= 20 dB background noise reduction in pause window, got {reduction_db:.2} dB (raw={raw_noise_db:.2} dB, cleaned={cleaned_noise_db:.2} dB)"
+    );
+    assert!(
+        cleaned_speech_db > -22.0,
+        "Expected active voice tone to remain strong (> -22 dB), got {cleaned_speech_db:.2} dB"
+    );
 }

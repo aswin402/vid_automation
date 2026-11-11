@@ -477,6 +477,7 @@ export const ReviewExportStep: React.FC<ReviewExportStepProps> = ({
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 pt-4 border-t border-border items-center">
               <div className="lg:col-span-7">
                 <video
+                  key={`${outputAsset.id}-${outputAsset.checksum || ''}`}
                   src={outputAsset.stream_url}
                   crossOrigin="anonymous"
                   controls
