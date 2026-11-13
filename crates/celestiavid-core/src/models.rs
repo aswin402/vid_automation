@@ -206,40 +206,44 @@ impl Default for ColorCorrectionSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioEnhancementSettings {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_custom_preset")]
+    #[serde(default = "default_clean_voice_preset")]
     pub preset: String,
-    #[serde(default)]
+    #[serde(default = "default_audio_nr")]
     pub noise_reduction: f64,
-    #[serde(default)]
+    #[serde(default = "default_audio_clarity")]
     pub voice_clarity: f64,
     #[serde(default = "default_highpass")]
     pub highpass_hz: u32,
     #[serde(default = "default_lowpass")]
     pub lowpass_hz: u32,
-    #[serde(default)]
+    #[serde(default = "default_audio_volume_db")]
     pub volume_db: f64,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub normalize_loudness: bool,
     #[serde(default = "default_true")]
     pub apply_to_transcription: bool,
 }
 
-fn default_highpass() -> u32 { 80 }
-fn default_lowpass() -> u32 { 16000 }
+fn default_clean_voice_preset() -> String { "clean_voice".into() }
+fn default_audio_nr() -> f64 { 0.45 }
+fn default_audio_clarity() -> f64 { 0.35 }
+fn default_highpass() -> u32 { 95 }
+fn default_lowpass() -> u32 { 14000 }
+fn default_audio_volume_db() -> f64 { 1.5 }
 
 impl Default for AudioEnhancementSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
-            preset: "custom".into(),
-            noise_reduction: 0.0,
-            voice_clarity: 0.0,
-            highpass_hz: 80,
-            lowpass_hz: 16000,
-            volume_db: 0.0,
-            normalize_loudness: false,
+            enabled: true,
+            preset: default_clean_voice_preset(),
+            noise_reduction: default_audio_nr(),
+            voice_clarity: default_audio_clarity(),
+            highpass_hz: default_highpass(),
+            lowpass_hz: default_lowpass(),
+            volume_db: default_audio_volume_db(),
+            normalize_loudness: true,
             apply_to_transcription: true,
         }
     }
@@ -247,15 +251,15 @@ impl Default for AudioEnhancementSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogoSettings {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
     pub asset_id: Option<String>,
-    #[serde(default = "default_top_right")]
+    #[serde(default = "default_bottom_right")]
     pub position: String,
-    #[serde(default)]
+    #[serde(default = "default_logo_x_ratio")]
     pub x_ratio: Option<f64>,
-    #[serde(default)]
+    #[serde(default = "default_logo_y_ratio")]
     pub y_ratio: Option<f64>,
     #[serde(default = "default_logo_width_ratio")]
     pub width_ratio: f64,
@@ -267,19 +271,21 @@ pub struct LogoSettings {
     pub apply_to_outro: bool,
 }
 
-fn default_top_right() -> String { "top-right".into() }
-fn default_logo_width_ratio() -> f64 { 0.14 }
+fn default_bottom_right() -> String { "bottom-right".into() }
+fn default_logo_x_ratio() -> Option<f64> { Some(0.89) }
+fn default_logo_y_ratio() -> Option<f64> { Some(0.68) }
+fn default_logo_width_ratio() -> f64 { 0.26 }
 fn default_logo_margin() -> f64 { 0.03 }
 
 impl Default for LogoSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             asset_id: None,
-            position: "top-right".into(),
-            x_ratio: None,
-            y_ratio: None,
-            width_ratio: 0.14,
+            position: default_bottom_right(),
+            x_ratio: default_logo_x_ratio(),
+            y_ratio: default_logo_y_ratio(),
+            width_ratio: default_logo_width_ratio(),
             opacity: 1.0,
             margin_ratio: 0.03,
             apply_to_outro: false,
@@ -398,7 +404,7 @@ impl Default for SubtitlesSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutroSettings {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
     pub asset_id: Option<String>,
@@ -411,7 +417,7 @@ fn default_pad_mode() -> String { "pad".into() }
 impl Default for OutroSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             asset_id: None,
             normalization_mode: "pad".into(),
         }
@@ -440,7 +446,11 @@ pub struct EditSettings {
     pub outro: OutroSettings,
     #[serde(default = "default_audio_policy")]
     pub audio_policy: String,
+    #[serde(default)]
+    pub overridden_tools: Vec<String>,
 }
+
+pub const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 2;
 
 fn default_schema_ver() -> u32 { 1 }
 fn default_audio_policy() -> String { "sequential_preserve".into() }
@@ -448,7 +458,7 @@ fn default_audio_policy() -> String { "sequential_preserve".into() }
 impl Default for EditSettings {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: CURRENT_SETTINGS_SCHEMA_VERSION,
             trim: TrimSettings::default(),
             crop: CropSettings::default(),
             output: OutputSettings::default(),
@@ -458,7 +468,43 @@ impl Default for EditSettings {
             subtitles: SubtitlesSettings::default(),
             outro: OutroSettings::default(),
             audio_policy: "sequential_preserve".into(),
+            overridden_tools: Vec::new(),
         }
+    }
+}
+
+impl EditSettings {
+    /// Upgrades pre-v2 stored settings so `Clean Voice` audio and the default custom logo placement
+    /// (`X: 89%`, `Y: 68%`, `Width: 26%`, `Opacity: 100%`, `Margin: 3%`, `Outro: off`, `Enabled: true`)
+    /// are selected by default across existing campaigns and projects while preserving explicit v2 edits.
+    pub fn upgrade_to_v2_defaults(&mut self) -> bool {
+        if self.schema_version >= CURRENT_SETTINGS_SCHEMA_VERSION {
+            return false;
+        }
+
+        let is_legacy_audio = !self.audio_enhancement.enabled
+            || matches!(
+                self.audio_enhancement.preset.as_str(),
+                "" | "none" | "neutral"
+            );
+        if is_legacy_audio {
+            self.audio_enhancement = AudioEnhancementSettings::default();
+        }
+
+        let is_legacy_logo = self.logo.x_ratio.is_none()
+            || self.logo.y_ratio.is_none()
+            || !self.logo.enabled
+            || (self.logo.width_ratio - 0.14).abs() < 0.02;
+        if is_legacy_logo {
+            let prev_asset_id = self.logo.asset_id.clone();
+            self.logo = LogoSettings {
+                asset_id: prev_asset_id,
+                ..LogoSettings::default()
+            };
+        }
+
+        self.schema_version = CURRENT_SETTINGS_SCHEMA_VERSION;
+        true
     }
 }
 

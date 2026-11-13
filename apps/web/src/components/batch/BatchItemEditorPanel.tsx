@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Image as ImageIcon,
   Crop,
@@ -15,7 +15,6 @@ import {
   CheckCircle2,
   AlertCircle,
   Move,
-  Play,
   Download,
   Trash2,
   ChevronDown,
@@ -34,6 +33,7 @@ import {
   Plus,
   Crosshair,
   SplitSquareHorizontal,
+  Unlink,
 } from 'lucide-react';
 import { extractApiError, videoApi } from '@/api/videoApi';
 import {
@@ -41,6 +41,14 @@ import {
   type CropBoxPatch,
 } from '@/components/studio/InteractiveVideoPreview';
 import { PositionGridPicker } from '@/components/studio/PositionGridPicker';
+import {
+  DEFAULT_LOGO_PRESET,
+  addOverriddenTool,
+  isToolOverriddenOnSettings,
+  mergeLiveMasterIntoRowSettings,
+  removeOverriddenTool,
+  studioTabToToolKey,
+} from '@/lib/batchSettingsMerge';
 import { COLOR_PRESETS } from '@/lib/colorPresets';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -64,6 +72,7 @@ import type {
   BatchDetail,
   BatchItemDetail,
   EditSettings,
+  OverridableToolId,
   SubtitleCue,
 } from '@/types/video';
 
@@ -172,8 +181,8 @@ export interface BatchRowWorkbenchCardProps {
   item: BatchItemDetail;
   rowNumber: number;
   activeTab: StudioNavbarTab;
+  masterSettings: EditSettings;
   queueWaitingPosition: number | null;
-  selectedItemIds: string[];
   isCollapsed: boolean;
   onToggleCollapse: () => void;
   allowedFonts: string[];
@@ -185,20 +194,13 @@ export interface BatchRowWorkbenchCardProps {
   onRemoveSingleLogo: () => Promise<void>;
   onTriggerSingleOutroUpload: () => void;
   onRemoveSingleOutro: () => Promise<void>;
+  onEnsureMasterSubtitlesEnabled?: () => void;
   getLiveSettingsForRow: (rowId: string) => EditSettings | undefined;
   onLiveDraftChange: (
     rowId: string,
     settings: EditSettings,
     isDirty: boolean
   ) => void;
-  onApplyToSelectedRows: (
-    sourceRowNumber: number,
-    settings: EditSettings
-  ) => Promise<void>;
-  onExportSingleRow: (
-    rowId: string,
-    latestSettings: EditSettings
-  ) => Promise<void>;
   onDeleteRow: (rowId: string) => Promise<void>;
   onBatchUpdated: (updated: BatchDetail) => void;
 }
@@ -208,8 +210,8 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
   item,
   rowNumber,
   activeTab,
+  masterSettings,
   queueWaitingPosition,
-  selectedItemIds,
   isCollapsed,
   onToggleCollapse,
   allowedFonts,
@@ -221,15 +223,15 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
   onRemoveSingleLogo,
   onTriggerSingleOutroUpload,
   onRemoveSingleOutro,
+  onEnsureMasterSubtitlesEnabled,
   getLiveSettingsForRow,
   onLiveDraftChange,
-  onApplyToSelectedRows,
-  onExportSingleRow,
   onDeleteRow,
   onBatchUpdated,
 }) => {
-  const [draft, setDraft] = useState<EditSettings>(item.settings);
-  const [dirty, setDirty] = useState(false);
+  const queryClient = useQueryClient();
+  const [localRowDraft, setLocalRowDraft] = useState<EditSettings | null>(null);
+  const dirty = localRowDraft !== null;
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>(
     'idle'
   );
@@ -243,7 +245,7 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
   const [isWidePreview, setIsWidePreview] = useState(false);
   const [isPreviewFullscreen, setIsPreviewFullscreen] = useState(false);
   const [subtitleSubTab, setSubtitleSubTab] = useState<'cues' | 'style'>(
-    'style'
+    'cues'
   );
 
   // Per-row AI Subtitles & Live Cue Editing
@@ -255,15 +257,11 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
   const [startingTranscribe, setStartingTranscribe] = useState(false);
 
   const [inheritFromRowId, setInheritFromRowId] = useState<string>('');
-  const [exportingSingle, setExportingSingle] = useState(false);
-  const [applyingBulk, setApplyingBulk] = useState(false);
   const [detectingFace, setDetectingFace] = useState(false);
   const [feedback, setFeedback] = useState<{
     kind: 'ok' | 'err';
     text: string;
   } | null>(null);
-
-  const draftRevisionRef = useRef(0);
 
   const subtitleQuery = useQuery({
     queryKey: ['row-subtitles', item.project_id, item.subtitle_cue_count],
@@ -279,6 +277,9 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
       if (job.status === 'completed') {
         setTranscribeJobId(null);
         setLocalCuesOverride(null);
+        await queryClient.invalidateQueries({
+          queryKey: ['row-subtitles', item.project_id],
+        });
         await subtitleQuery.refetch();
         const refreshed = await videoApi.getBatch(batch.id);
         onBatchUpdated(refreshed);
@@ -296,41 +297,11 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
   });
 
   const activeSubVersion = subtitleQuery.data?.version ?? 0;
-  const effectiveCues = useMemo(
-    () => localCuesOverride ?? subtitleQuery.data?.cues ?? [],
-    [localCuesOverride, subtitleQuery.data?.cues]
-  );
 
-  // Auto-save edited subtitle cues after 550ms
-  useEffect(() => {
-    if (!cuesDirty || localCuesOverride === null) return;
-    const cuesSnapshot = localCuesOverride;
-    const timer = window.setTimeout(async () => {
-      try {
-        await videoApi.saveSubtitleVersion(
-          item.project_id,
-          activeSubVersion,
-          draft.subtitles.language || 'en',
-          cuesSnapshot
-        );
-        setCuesDirty(false);
-        await subtitleQuery.refetch();
-      } catch (err) {
-        setFeedback({
-          kind: 'err',
-          text: extractApiError(err, 'Failed to save subtitle cues.'),
-        });
-      }
-    }, 550);
-    return () => window.clearTimeout(timer);
-  }, [
-    cuesDirty,
-    localCuesOverride,
-    item.project_id,
-    activeSubVersion,
-    draft.subtitles.language,
-    subtitleQuery,
-  ]);
+  const effectiveCues = useMemo<SubtitleCue[]>(() => {
+    if (localCuesOverride !== null) return localCuesOverride;
+    return subtitleQuery.data?.cues ?? [];
+  }, [localCuesOverride, subtitleQuery.data?.cues]);
 
   const otherRows = useMemo(
     () => batch.items.filter((r) => r.id !== item.id),
@@ -354,23 +325,91 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
     ? batch.outros.find((o) => o.id === item.outro_asset_id) ?? singleOutroAsset
     : singleOutroAsset;
 
+  const activeToolKey = studioTabToToolKey(activeTab);
+
+  const baseRowSettings = localRowDraft ?? item.settings;
+
+  // Merge live Master Control settings into all non-overridden tools on this row
+  const draft = useMemo(
+    () =>
+      mergeLiveMasterIntoRowSettings(masterSettings, baseRowSettings, {
+        hasLogoAsset: Boolean(logoAsset),
+        hasOutroAsset: Boolean(outroAsset),
+        sourceWidth: sourceAsset?.width,
+        sourceHeight: sourceAsset?.height,
+      }),
+    [
+      masterSettings,
+      baseRowSettings,
+      logoAsset,
+      outroAsset,
+      sourceAsset?.width,
+      sourceAsset?.height,
+    ]
+  );
+
+  const isActiveToolSeparate = isToolOverriddenOnSettings(draft, activeToolKey);
+
+  // Auto-save edited subtitle cues after 550ms
   useEffect(() => {
-    if (!dirty) return;
-    const revSnapshot = draftRevisionRef.current;
+    if (!cuesDirty || localCuesOverride === null) return;
+    const cuesSnapshot = localCuesOverride;
+    const timer = window.setTimeout(async () => {
+      try {
+        await videoApi.saveSubtitleVersion(
+          item.project_id,
+          activeSubVersion,
+          draft.subtitles.language || 'en',
+          cuesSnapshot
+        );
+        setCuesDirty(false);
+        setLocalCuesOverride(null);
+        await queryClient.invalidateQueries({
+          queryKey: ['row-subtitles', item.project_id],
+        });
+        await subtitleQuery.refetch();
+        const refreshed = await videoApi.getBatch(batch.id);
+        onBatchUpdated(refreshed);
+      } catch (err) {
+        setFeedback({
+          kind: 'err',
+          text: extractApiError(err, 'Failed to save subtitle cues.'),
+        });
+      }
+    }, 550);
+    return () => window.clearTimeout(timer);
+  }, [
+    cuesDirty,
+    localCuesOverride,
+    item.project_id,
+    activeSubVersion,
+    draft.subtitles.language,
+    queryClient,
+    subtitleQuery,
+    batch.id,
+    onBatchUpdated,
+  ]);
+
+  useEffect(() => {
+    if (!localRowDraft) return;
+    const rawSnapshot = localRowDraft;
     const snapshot = draft;
     const timer = window.setTimeout(async () => {
       setSaveState('saving');
       try {
         const updated = await videoApi.updateBatchItem(batch.id, item.id, {
-          use_custom_settings: true,
+          use_custom_settings: (snapshot.overridden_tools?.length ?? 0) > 0,
           settings: snapshot,
         });
         onBatchUpdated(updated);
-        if (draftRevisionRef.current === revSnapshot) {
-          setDirty(false);
-          onLiveDraftChange(item.id, snapshot, false);
-          setSaveState('saved');
-        }
+        setLocalRowDraft((cur) => {
+          if (cur === rawSnapshot) {
+            onLiveDraftChange(item.id, snapshot, false);
+            setSaveState('saved');
+            return null;
+          }
+          return cur;
+        });
       } catch (err) {
         setSaveState('idle');
         setFeedback({
@@ -380,20 +419,83 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
       }
     }, 420);
     return () => window.clearTimeout(timer);
-  }, [dirty, draft, batch.id, item.id, onBatchUpdated, onLiveDraftChange]);
+  }, [localRowDraft, draft, batch.id, item.id, onBatchUpdated, onLiveDraftChange]);
 
-  const updateDraft = (updater: (prev: EditSettings) => EditSettings) => {
-    setDraft((prev) => {
-      const next = updater(prev);
-      draftRevisionRef.current += 1;
+  const updateDraft = (
+    updater: (prev: EditSettings) => EditSettings,
+    explicitTool?: OverridableToolId | null
+  ) => {
+    const toolToMark =
+      explicitTool !== undefined ? explicitTool : activeToolKey;
+    setLocalRowDraft((prevLocal) => {
+      const mergedPrev = mergeLiveMasterIntoRowSettings(
+        masterSettings,
+        prevLocal ?? item.settings,
+        {
+          hasLogoAsset: Boolean(logoAsset),
+          hasOutroAsset: Boolean(outroAsset),
+          sourceWidth: sourceAsset?.width,
+          sourceHeight: sourceAsset?.height,
+        }
+      );
+      const updated = updater(mergedPrev);
+      const next: EditSettings = {
+        ...updated,
+        overridden_tools: addOverriddenTool(
+          updated.overridden_tools,
+          toolToMark
+        ),
+      };
       onLiveDraftChange(item.id, next, true);
       return next;
     });
-    setDirty(true);
     setSaveState('idle');
     setFeedback(null);
     if (previewMode === 'rendered') {
       setPreviewMode('canvas');
+    }
+  };
+
+  const handleSwitchToSeparateEdit = () => {
+    if (!activeToolKey) return;
+    updateDraft((prev) => prev, activeToolKey);
+  };
+
+  const handleRejoinMasterControl = async () => {
+    if (!activeToolKey) return;
+    const remainingOverrides = removeOverriddenTool(
+      draft.overridden_tools,
+      activeToolKey
+    );
+    const syncedNext = mergeLiveMasterIntoRowSettings(
+      masterSettings,
+      {
+        ...draft,
+        overridden_tools: remainingOverrides,
+      },
+      {
+        hasLogoAsset: Boolean(logoAsset),
+        hasOutroAsset: Boolean(outroAsset),
+        sourceWidth: sourceAsset?.width,
+        sourceHeight: sourceAsset?.height,
+      }
+    );
+    setLocalRowDraft(null);
+    onLiveDraftChange(item.id, syncedNext, false);
+    setSaveState('saving');
+    try {
+      const updated = await videoApi.updateBatchItem(batch.id, item.id, {
+        use_custom_settings: remainingOverrides.length > 0,
+        settings: syncedNext,
+      });
+      onBatchUpdated(updated);
+      setSaveState('saved');
+    } catch (err) {
+      setSaveState('idle');
+      setFeedback({
+        kind: 'err',
+        text: extractApiError(err, 'Failed to re-link to Master Control.'),
+      });
     }
   };
 
@@ -409,6 +511,15 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
     const sameSourceVideo = donorRow.source_asset_id === item.source_asset_id;
     const adapted: EditSettings = {
       ...donorSettings,
+      overridden_tools: [
+        'crop',
+        'subtitles',
+        'color',
+        'audio',
+        'logo',
+        'outro',
+        'output',
+      ],
       logo: {
         ...donorSettings.logo,
         asset_id: item.settings.logo.asset_id,
@@ -432,9 +543,7 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
           },
     };
 
-    draftRevisionRef.current += 1;
-    setDraft(adapted);
-    setDirty(false);
+    setLocalRowDraft(null);
     setPreviewMode('canvas');
     onLiveDraftChange(item.id, adapted, false);
     setSaveState('saving');
@@ -587,14 +696,17 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
     setStartingTranscribe(true);
     setFeedback(null);
     try {
+      if (!isActiveToolSeparate) {
+        onEnsureMasterSubtitlesEnabled?.();
+      }
       // Ensure latest trim/audio settings are persisted before Whisper runs
       const nextDraft: EditSettings = {
         ...draft,
         subtitles: { ...draft.subtitles, enabled: true },
       };
-      setDraft(nextDraft);
+      setLocalRowDraft(null);
       const updatedBatch = await videoApi.updateBatchItem(batch.id, item.id, {
-        use_custom_settings: true,
+        use_custom_settings: (nextDraft.overridden_tools?.length ?? 0) > 0,
         settings: nextDraft,
       });
       onBatchUpdated(updatedBatch);
@@ -625,10 +737,16 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
     setLocalCuesOverride(next);
     setCuesDirty(true);
     if (!draft.subtitles.enabled) {
-      updateDraft((prev) => ({
-        ...prev,
-        subtitles: { ...prev.subtitles, enabled: true },
-      }));
+      if (!isActiveToolSeparate) {
+        onEnsureMasterSubtitlesEnabled?.();
+      }
+      updateDraft(
+        (prev) => ({
+          ...prev,
+          subtitles: { ...prev.subtitles, enabled: true },
+        }),
+        isActiveToolSeparate ? 'subtitles' : null
+      );
     }
   };
 
@@ -648,51 +766,6 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
       },
     ]);
     setSubtitleSubTab('cues');
-  };
-
-  const handleSingleExportClick = async () => {
-    setExportingSingle(true);
-    setFeedback(null);
-    try {
-      if (cuesDirty && localCuesOverride !== null) {
-        await videoApi.saveSubtitleVersion(
-          item.project_id,
-          activeSubVersion,
-          draft.subtitles.language || 'en',
-          localCuesOverride
-        );
-        setCuesDirty(false);
-      }
-      await onExportSingleRow(item.id, draft);
-      setDirty(false);
-      setSaveState('saved');
-    } catch (err) {
-      setFeedback({
-        kind: 'err',
-        text: extractApiError(err, 'Failed to queue single video export.'),
-      });
-    } finally {
-      setExportingSingle(false);
-    }
-  };
-
-  const handlePushToSelected = async () => {
-    setApplyingBulk(true);
-    setFeedback(null);
-    try {
-      await onApplyToSelectedRows(rowNumber, draft);
-      setFeedback({
-        kind: 'ok',
-        text: `Copied to ${selectedItemIds.length || 'shared'} row(s).`,
-      });
-    } catch (err) {
-      setFeedback({
-        kind: 'err',
-        text: extractApiError(err, 'Failed to copy settings.'),
-      });
-    } finally {
-      setApplyingBulk(false);
-    }
   };
 
   const previewSettings: EditSettings = {
@@ -977,28 +1050,48 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
             </HintTooltip>
           )}
 
-          {!isQueued && !isProcessing && (
+          {activeToolKey !== null && (
             <HintTooltip
               label={
-                isCompleted
-                  ? `Re-export Row #${rowNumber}`
-                  : `Export Row #${rowNumber}`
+                isActiveToolSeparate
+                  ? `Separate ${TAB_HEADERS[activeTab].title} Edit Active`
+                  : `Inheriting Master ${TAB_HEADERS[activeTab].title}`
               }
-              detail="Render this single video to MP4"
+              detail={
+                isActiveToolSeparate
+                  ? 'Click to discard separate override and rejoin Master Control'
+                  : 'Click to customize this video separately without changing Master Control'
+              }
               side="top"
             >
               <Button
                 type="button"
+                variant={isActiveToolSeparate ? 'secondary' : 'outline'}
                 size="xs"
-                disabled={exportingSingle || !sourceAsset}
-                onClick={() => void handleSingleExportClick()}
+                onClick={() => {
+                  if (isActiveToolSeparate) {
+                    void handleRejoinMasterControl();
+                  } else {
+                    handleSwitchToSeparateEdit();
+                  }
+                }}
+                className={
+                  isActiveToolSeparate
+                    ? 'border border-amber-500/40 bg-amber-500/12 text-amber-300 hover:bg-amber-500/20'
+                    : 'text-muted-foreground hover:text-foreground'
+                }
               >
-                {exportingSingle ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
+                {isActiveToolSeparate ? (
+                  <>
+                    <RotateCcw className="h-3 w-3" />
+                    <span>Use Master</span>
+                  </>
                 ) : (
-                  <Play className="h-3 w-3 fill-current" />
+                  <>
+                    <Unlink className="h-3 w-3" />
+                    <span>Separate Edit</span>
+                  </>
                 )}
-                <span>Export #{rowNumber}</span>
               </Button>
             </HintTooltip>
           )}
@@ -1083,14 +1176,55 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
             <div className="space-y-2.5">
               <div className="rounded-xl bg-background/75 border border-border p-3.5 space-y-3.5">
                 {/* Inspector Header */}
-                <div className="flex items-center justify-between pb-2 border-b border-border/70">
-                  <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-foreground">
-                    <TabHeaderIcon className="h-3.5 w-3.5 text-primary" />
-                    {TAB_HEADERS[activeTab].title}
-                  </span>
-                  <span className="text-[11px] font-mono text-muted-foreground">
-                    {effectiveOutDims.width}×{effectiveOutDims.height}
-                  </span>
+                <div className="flex items-center justify-between gap-2 pb-2 border-b border-border/70">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-foreground">
+                      <TabHeaderIcon className="h-3.5 w-3.5 text-primary" />
+                      {TAB_HEADERS[activeTab].title}
+                    </span>
+                    {activeToolKey !== null && (
+                      <Badge
+                        variant="outline"
+                        className={
+                          isActiveToolSeparate
+                            ? 'text-[10px] border-amber-500/40 bg-amber-500/10 text-amber-300 gap-1'
+                            : 'text-[10px] border-primary/30 bg-primary/10 text-primary gap-1'
+                        }
+                      >
+                        {isActiveToolSeparate ? (
+                          <>
+                            <Unlink className="h-2.5 w-2.5" />
+                            Separate
+                          </>
+                        ) : (
+                          <>
+                            <Layers className="h-2.5 w-2.5" />
+                            Master
+                          </>
+                        )}
+                      </Badge>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {activeToolKey !== null && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (isActiveToolSeparate) {
+                            void handleRejoinMasterControl();
+                          } else {
+                            handleSwitchToSeparateEdit();
+                          }
+                        }}
+                        className="text-[10px] font-medium text-primary hover:underline cursor-pointer"
+                      >
+                        {isActiveToolSeparate ? 'Use Master' : 'Edit Separately'}
+                      </button>
+                    )}
+                    <span className="text-[11px] font-mono text-muted-foreground">
+                      {effectiveOutDims.width}×{effectiveOutDims.height}
+                    </span>
+                  </div>
                 </div>
 
                 {/* ==================== 1. TRIM TAB ==================== */}
@@ -2591,13 +2725,26 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
                         <Switch
                           checked={Boolean(draft.audio_enhancement?.enabled)}
                           onCheckedChange={(checked) =>
-                            updateDraft((prev) => ({
-                              ...prev,
-                              audio_enhancement: {
-                                ...prev.audio_enhancement,
-                                enabled: checked,
-                              },
-                            }))
+                            updateDraft((prev) => {
+                              const cur = prev.audio_enhancement;
+                              const needsCleanDefault =
+                                checked &&
+                                cur.noise_reduction === 0 &&
+                                cur.voice_clarity === 0;
+                              return {
+                                ...prev,
+                                audio_enhancement: {
+                                  ...cur,
+                                  enabled: checked,
+                                  ...(needsCleanDefault
+                                    ? {
+                                        preset: 'clean_voice',
+                                        ...BATCH_AUDIO_PRESETS[0].values,
+                                      }
+                                    : {}),
+                                },
+                              };
+                            })
                           }
                         />
                       </div>
@@ -2605,9 +2752,12 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
 
                     <div className="grid grid-cols-2 gap-1.5">
                       {BATCH_AUDIO_PRESETS.map((p) => {
+                        const presetVal = draft.audio_enhancement?.preset;
                         const active =
-                          draft.audio_enhancement?.enabled &&
-                          draft.audio_enhancement.preset === p.id;
+                          Boolean(draft.audio_enhancement?.enabled) &&
+                          (presetVal === p.id ||
+                            (p.id === 'clean_voice' &&
+                              (!presetVal || presetVal === 'none')));
                         return (
                           <HintTooltip
                             key={p.id}
@@ -2759,7 +2909,7 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
                                 Low-Cut
                               </span>
                               <span className="font-mono">
-                                {draft.audio_enhancement?.highpass_hz || 80}Hz
+                                {draft.audio_enhancement?.highpass_hz || 95}Hz
                               </span>
                             </div>
                             <Slider
@@ -2767,7 +2917,7 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
                               max={300}
                               step={5}
                               value={[
-                                draft.audio_enhancement?.highpass_hz || 80,
+                                draft.audio_enhancement?.highpass_hz || 95,
                               ]}
                               onValueChange={(vals) => {
                                 if (vals[0] !== undefined) {
@@ -2792,7 +2942,7 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
                               <span className="font-mono">
                                 {(
                                   (draft.audio_enhancement?.lowpass_hz ||
-                                    16000) / 1000
+                                    14000) / 1000
                                 ).toFixed(1)}
                                 kHz
                               </span>
@@ -2800,9 +2950,9 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
                             <Slider
                               min={4000}
                               max={20000}
-                              step={500}
+                              step={250}
                               value={[
-                                draft.audio_enhancement?.lowpass_hz || 16000,
+                                draft.audio_enhancement?.lowpass_hz || 14000,
                               ]}
                               onValueChange={(vals) => {
                                 if (vals[0] !== undefined) {
@@ -2951,11 +3101,28 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
                             }
                           />
 
-                          {/* Quick Size Presets + Fine X/Y */}
+                          {/* Quick Size Presets + Default Reset */}
                           <div className="flex-1 space-y-2">
-                            <span className="block text-[11px] text-muted-foreground">
-                              Quick Scale
-                            </span>
+                            <div className="flex items-center justify-between">
+                              <span className="block text-[11px] text-muted-foreground">
+                                Quick Scale
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateDraft((prev) => ({
+                                    ...prev,
+                                    logo: {
+                                      ...prev.logo,
+                                      ...DEFAULT_LOGO_PRESET,
+                                    },
+                                  }))
+                                }
+                                className="text-[10px] text-primary hover:underline cursor-pointer"
+                              >
+                                Reset Default
+                              </button>
+                            </div>
                             <div className="grid grid-cols-3 gap-1">
                               {[
                                 { label: 'S 8%', val: 0.08 },
@@ -3026,7 +3193,7 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
                               min={0}
                               max={1}
                               step={0.01}
-                              value={[draft.logo.x_ratio ?? 0.95]}
+                              value={[draft.logo.x_ratio ?? 0.89]}
                               onValueChange={(vals) => {
                                 if (vals[0] !== undefined) {
                                   updateDraft((prev) => ({
@@ -3034,7 +3201,7 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
                                     logo: {
                                       ...prev.logo,
                                       x_ratio: vals[0],
-                                      y_ratio: prev.logo.y_ratio ?? 0.05,
+                                      y_ratio: prev.logo.y_ratio ?? 0.68,
                                     },
                                   }));
                                 }
@@ -3055,14 +3222,14 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
                               min={0}
                               max={1}
                               step={0.01}
-                              value={[draft.logo.y_ratio ?? 0.05]}
+                              value={[draft.logo.y_ratio ?? 0.68]}
                               onValueChange={(vals) => {
                                 if (vals[0] !== undefined) {
                                   updateDraft((prev) => ({
                                     ...prev,
                                     logo: {
                                       ...prev.logo,
-                                      x_ratio: prev.logo.x_ratio ?? 0.95,
+                                      x_ratio: prev.logo.x_ratio ?? 0.89,
                                       y_ratio: vals[0],
                                     },
                                   }));
@@ -3083,7 +3250,7 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
                           </div>
                           <Slider
                             min={0.04}
-                            max={0.4}
+                            max={0.45}
                             step={0.01}
                             value={[draft.logo.width_ratio]}
                             onValueChange={(vals) => {
@@ -3298,13 +3465,16 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
                             <Switch
                               checked={draft.logo.apply_to_outro}
                               onCheckedChange={(checked) =>
-                                updateDraft((prev) => ({
-                                  ...prev,
-                                  logo: {
-                                    ...prev.logo,
-                                    apply_to_outro: checked,
-                                  },
-                                }))
+                                updateDraft(
+                                  (prev) => ({
+                                    ...prev,
+                                    logo: {
+                                      ...prev.logo,
+                                      apply_to_outro: checked,
+                                    },
+                                  }),
+                                  'logo'
+                                )
                               }
                             />
                           </div>
@@ -3318,13 +3488,16 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
                                 draft.color_correction?.apply_to_outro
                               )}
                               onCheckedChange={(checked) =>
-                                updateDraft((prev) => ({
-                                  ...prev,
-                                  color_correction: {
-                                    ...prev.color_correction,
-                                    apply_to_outro: checked,
-                                  },
-                                }))
+                                updateDraft(
+                                  (prev) => ({
+                                    ...prev,
+                                    color_correction: {
+                                      ...prev.color_correction,
+                                      apply_to_outro: checked,
+                                    },
+                                  }),
+                                  'color'
+                                )
                               }
                             />
                           </div>
@@ -3568,32 +3741,6 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
                 )}
               </div>
 
-              {/* Copy Row Edits to All Selected Rows */}
-              <HintTooltip
-                label="Sync Settings Across Queue"
-                detail="Applies this row's active settings to all checked rows in the batch"
-                side="top"
-              >
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={applyingBulk}
-                  onClick={() => void handlePushToSelected()}
-                  className="w-full"
-                >
-                  {applyingBulk ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Layers className="h-3.5 w-3.5 text-primary" />
-                  )}
-                  <span>
-                    Copy #{rowNumber} Edits to Selected (
-                    {selectedItemIds.length || 'All'})
-                  </span>
-                </Button>
-              </HintTooltip>
-
               {feedback && (
                 <div
                   className={`rounded-lg px-2.5 py-1.5 text-[11px] flex items-center gap-1.5 border ${
@@ -3714,29 +3861,35 @@ export const BatchItemEditorPanel: React.FC<BatchRowWorkbenchCardProps> = ({
                       enableFullscreenToolTabs
                       onFullscreenChange={setIsPreviewFullscreen}
                       onDragLogo={(xRatio, yRatio) => {
-                        updateDraft((prev) => ({
-                          ...prev,
-                          logo: {
-                            ...prev.logo,
-                            enabled: true,
-                            x_ratio: xRatio,
-                            y_ratio: yRatio,
-                          },
-                        }));
-                      }}
-                      onDragSubtitle={(xRatio, yRatio) => {
-                        updateDraft((prev) => ({
-                          ...prev,
-                          subtitles: {
-                            ...prev.subtitles,
-                            enabled: true,
-                            style: {
-                              ...prev.subtitles.style,
+                        updateDraft(
+                          (prev) => ({
+                            ...prev,
+                            logo: {
+                              ...prev.logo,
+                              enabled: true,
                               x_ratio: xRatio,
                               y_ratio: yRatio,
                             },
-                          },
-                        }));
+                          }),
+                          'logo'
+                        );
+                      }}
+                      onDragSubtitle={(xRatio, yRatio) => {
+                        updateDraft(
+                          (prev) => ({
+                            ...prev,
+                            subtitles: {
+                              ...prev.subtitles,
+                              enabled: true,
+                              style: {
+                                ...prev.subtitles.style,
+                                x_ratio: xRatio,
+                                y_ratio: yRatio,
+                              },
+                            },
+                          }),
+                          'subtitles'
+                        );
                       }}
                     />
                   )}

@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [0.2.3] - 2026-11-13
+
+### Added — Master Control Inheritance, Step-by-Step Batch Workflow & Scrollable Output Queue
+- **Master Control Studio Panel & Per-Tool Inheritance (`BatchMasterControlPanel.tsx`, `batchSettingsMerge.ts`, `crates/celestiavid-core/src/batch.rs`, `crates/celestiavid-core/src/models.rs`)**:
+  - Added shared **Master Control** editing across `Ratio & Face`, `Subtitles`, `Color`, `Audio`, `Logo`, and `Outro` so edits automatically inherit to all linked videos while preserving per-video `Trim` ranges.
+  - Added per-tool `overridden_tools` tracking so any individual video can detach into a **Separate Edit** or re-link (`Link to Master` / `Sync All to Master`) without losing edits on other tools.
+  - Completed **Master Control Subtitles** with immediate live WYSIWYG subtitle preview & drag-on-frame on Master Control's canvas, `Style | Cues (N)` sub-tabs, live bulk Whisper AI job polling (`Transcribing X/N...`) with two-way cue cache synchronization across Master Control and row cards, `Shadow Depth`, `Snap to Anchor`, and custom `X / Y` placement sliders.
+- **Guided `Save & Next` Progression & Dedicated Scrollable Output Column (`BatchStudioPage.tsx`, `BatchOutputColumn.tsx`)**:
+  - Replaced top export/re-export menu clutter on editing tabs with a streamlined `Back` and `Save & Next` step bar (`Trim` -> `Ratio & Face` -> `Subtitles` -> `Color` -> `Audio` -> `Logo` -> `Outro` -> `Output`) that auto-flushes Master Control and per-video drafts.
+  - Added a dedicated **Output** view (`BatchOutputColumn.tsx`) with sequential **Export All** / **Export Selected** queue rendering, a vertical scrollable column of finished videos with inline playback, and 1-click **Edit Alone** / **Edit Selected** subset re-editing and re-exporting.
+
+### Changed — Default `Clean Voice` Audio & Brand Logo Placement (`schema_version = 2`)
+- **Out-of-the-Box Studio & Batch Defaults (`models.rs`, `db.rs`, `batch.rs`, `engine.rs`, `AudioEnhancementStep.tsx`, `LogoStep.tsx`)**:
+  - Enabled **Clean Voice** audio enhancement (`noise_reduction: 0.45`, `voice_clarity: 0.35`, `highpass_hz: 95`, `lowpass_hz: 14000`, `volume_db: +1.5`, `-16 LUFS` loudness normalization) and custom **Brand Logo** placement (`Width 26%`, `X 89%`, `Y 68%`, `Opacity 100%`, `Margin 3%`, `Show logo during Outro: Off`) by default across all new single projects, batch Master Controls, and per-video rows.
+  - Added automatic SQLite `schema_version = 2` settings migration (`migrate_v2_settings_defaults`) on startup and backup restore so existing untouched v1 records upgrade cleanly.
+
+---
+
 ## [0.2.2] - 2026-11-13
 
 ### Added — Multi-Video Batch Automation, AI Face Framing, Auto-Updater & Full Screen Floating Studio

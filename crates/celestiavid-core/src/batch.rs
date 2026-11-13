@@ -2,7 +2,7 @@ use crate::db::{now_iso, BATCH_ITEM_OWNER_ID, BATCH_LIBRARY_OWNER_ID};
 use crate::engine::CelestiaEngine;
 use crate::error::{AppError, AppResult};
 use crate::media::ass_generator::generate_ass_content;
-use crate::media::crop::analyze_video_auto_frame;
+use crate::media::crop::{analyze_video_auto_frame, compute_aspect_crop_size};
 use crate::media::demo::{generate_synthetic_logo, generate_synthetic_video};
 use crate::media::pipeline::{
     extract_audio_for_transcription, normalize_and_concat_outro, render_main_segment,
@@ -611,6 +611,87 @@ impl CelestiaEngine {
         })
     }
 
+    /// Merges Batch Master Control (`shared_settings_json`) into a specific item's `EditSettings`,
+    /// inheriting every tool NOT listed in `item_base.overridden_tools` while always keeping `trim` per-video.
+    fn merge_master_into_item_settings(
+        master: &EditSettings,
+        item_base: &EditSettings,
+        src_dims: Option<(u32, u32)>,
+    ) -> EditSettings {
+        let has_override = |tool: &str| item_base.overridden_tools.iter().any(|t| t == tool);
+
+        let crop = if has_override("crop") {
+            item_base.crop.clone()
+        } else {
+            let mut c = master.crop.clone();
+            if c.enabled && c.aspect_ratio != "original" && c.aspect_ratio != "custom" {
+                let (sw, sh) = src_dims.unwrap_or((1920, 1080));
+                let (bw, bh) =
+                    compute_aspect_crop_size(&c.aspect_ratio, sw, sh, c.zoom.max(1.0));
+                c.width = bw;
+                c.height = bh;
+                c.x = ((1.0 - bw) / 2.0).clamp(0.0, (1.0 - bw).max(0.0));
+                c.y = ((1.0 - bh) / 2.0).clamp(0.0, (1.0 - bh).max(0.0));
+            }
+            if item_base.crop.aspect_ratio == c.aspect_ratio
+                && (item_base.crop.zoom - c.zoom).abs() < 1e-4
+                && item_base.crop.auto_face_framing == c.auto_face_framing
+            {
+                if let Some(face) = item_base.crop.detected_face.clone() {
+                    c.detected_face = Some(face);
+                    c.x = item_base.crop.x;
+                    c.y = item_base.crop.y;
+                    c.keyframes = item_base.crop.keyframes.clone();
+                } else {
+                    c.detected_face = None;
+                    c.keyframes = Vec::new();
+                }
+            } else {
+                c.detected_face = None;
+                c.keyframes = Vec::new();
+            }
+            c
+        };
+
+        EditSettings {
+            schema_version: master.schema_version.max(item_base.schema_version),
+            trim: item_base.trim.clone(),
+            crop,
+            output: if has_override("output") {
+                item_base.output.clone()
+            } else {
+                master.output.clone()
+            },
+            color_correction: if has_override("color") {
+                item_base.color_correction.clone()
+            } else {
+                master.color_correction.clone()
+            },
+            audio_enhancement: if has_override("audio") {
+                item_base.audio_enhancement.clone()
+            } else {
+                master.audio_enhancement.clone()
+            },
+            logo: if has_override("logo") {
+                item_base.logo.clone()
+            } else {
+                master.logo.clone()
+            },
+            subtitles: if has_override("subtitles") {
+                item_base.subtitles.clone()
+            } else {
+                master.subtitles.clone()
+            },
+            outro: if has_override("outro") {
+                item_base.outro.clone()
+            } else {
+                master.outro.clone()
+            },
+            audio_policy: master.audio_policy.clone(),
+            overridden_tools: item_base.overridden_tools.clone(),
+        }
+    }
+
     /// Synchronizes a Batch Item's backing `Project` (`source`, `logo`, `outro` zero-copy asset links + `EditSettings`).
     fn sync_batch_item_project(
         &self,
@@ -624,6 +705,7 @@ impl CelestiaEngine {
         // Sync each of ("source", "logo", "outro")
         let mut resolved_slot_ids: HashMap<&'static str, Option<String>> = HashMap::new();
         let mut resolved_source_duration: Option<i64> = None;
+        let mut resolved_source_dims: Option<(u32, u32)> = None;
 
         for (kind, pool_id_opt) in [
             ("source", item.source_asset_id.as_deref()),
@@ -639,6 +721,7 @@ impl CelestiaEngine {
                 if let Ok(pool_asset) = self.db.get_asset(pool_id) {
                     if kind == "source" {
                         resolved_source_duration = pool_asset.duration_ms;
+                        resolved_source_dims = pool_asset.width.zip(pool_asset.height);
                     }
                     // Check if backing project already has a ready asset with the exact same storage_key
                     if let Some(matching) = current_slot_assets
@@ -692,16 +775,22 @@ impl CelestiaEngine {
             resolved_slot_ids.insert(kind, None);
         }
 
-        // Compute effective EditSettings
-        let base_settings = if let Some(explicit) = explicit_settings_override {
+        // Compute effective EditSettings by merging Master Control (`batch.shared_settings_json`)
+        // with per-video `trim` and any explicitly overridden tools in `overridden_tools`
+        let mut item_base = if let Some(explicit) = explicit_settings_override {
             explicit.clone()
-        } else if item.use_custom_settings {
-            proj.settings_json.clone()
         } else {
-            batch.shared_settings_json.clone()
+            proj.settings_json.clone()
         };
+        if explicit_settings_override.is_none() && !item.use_custom_settings {
+            item_base.overridden_tools.clear();
+        }
 
-        let mut merged = base_settings;
+        let mut merged = Self::merge_master_into_item_settings(
+            &batch.shared_settings_json,
+            &item_base,
+            resolved_source_dims,
+        );
 
         // Safely adapt trim range to this specific video's duration so different-length clips never fail!
         if let Some(dur_ms) = resolved_source_duration.filter(|&d| d >= 200) {
@@ -715,24 +804,14 @@ impl CelestiaEngine {
             }
         }
 
-        // Bind mapped logo & outro asset IDs
+        // Bind mapped logo & outro asset IDs (keep `logo.enabled` defaulting to Master/Row preference
+        // even before a logo image is uploaded; FFmpeg export only overlays when a ready logo asset exists)
         let proj_logo_id = resolved_slot_ids.get("logo").cloned().flatten();
-        if let Some(lid) = proj_logo_id {
-            merged.logo.asset_id = Some(lid);
-            if explicit_settings_override.is_none() && !item.use_custom_settings {
-                merged.logo.enabled = batch.shared_settings_json.logo.enabled;
-            }
-        } else {
-            merged.logo.asset_id = None;
-            merged.logo.enabled = false;
-        }
+        merged.logo.asset_id = proj_logo_id;
 
         let proj_outro_id = resolved_slot_ids.get("outro").cloned().flatten();
         if let Some(oid) = proj_outro_id {
             merged.outro.asset_id = Some(oid);
-            if explicit_settings_override.is_none() && !item.use_custom_settings {
-                merged.outro.enabled = batch.shared_settings_json.outro.enabled;
-            }
         } else {
             merged.outro.asset_id = None;
             merged.outro.enabled = false;
@@ -775,10 +854,20 @@ impl CelestiaEngine {
                     item.use_custom_settings = false;
                     item.updated_at = now_iso();
                     self.db.update_batch_item(&item)?;
+                    if let Ok(p) = self.db.get_project(&item.project_id) {
+                        let mut cleared = p.settings_json;
+                        cleared.overridden_tools.clear();
+                        let _ = self.db.update_project(
+                            &item.project_id,
+                            None,
+                            None,
+                            Some(&cleared),
+                            None,
+                            None,
+                        );
+                    }
                 }
-                if !item.use_custom_settings {
-                    self.sync_batch_item_project(&updated_batch, &item, None)?;
-                }
+                self.sync_batch_item_project(&updated_batch, &item, None)?;
             }
         }
 
@@ -971,10 +1060,26 @@ impl CelestiaEngine {
                 Some(oid)
             };
         }
-        if let Some(ucs) = req.use_custom_settings {
+        if let Some(ref explicit_s) = req.settings {
+            item.use_custom_settings = req
+                .use_custom_settings
+                .unwrap_or(!explicit_s.overridden_tools.is_empty());
+        } else if let Some(ucs) = req.use_custom_settings {
             item.use_custom_settings = ucs;
-        } else if req.settings.is_some() {
-            item.use_custom_settings = true;
+            if !ucs {
+                if let Ok(p) = self.db.get_project(&item.project_id) {
+                    let mut cleared = p.settings_json;
+                    cleared.overridden_tools.clear();
+                    let _ = self.db.update_project(
+                        &item.project_id,
+                        None,
+                        None,
+                        Some(&cleared),
+                        None,
+                        None,
+                    );
+                }
+            }
         }
 
         item.updated_at = now_iso();
@@ -1003,9 +1108,11 @@ impl CelestiaEngine {
     ) -> AppResult<BatchDetailResponse> {
         let mut batch = self.db.get_batch(batch_id)?;
         if req.update_shared {
+            let mut master_clean = req.settings.clone();
+            master_clean.overridden_tools.clear();
             batch = self
                 .db
-                .update_batch(batch_id, None, None, None, Some(&req.settings))?;
+                .update_batch(batch_id, None, None, None, Some(&master_clean))?;
         }
 
         let target_set: HashSet<String> = req.item_ids.into_iter().collect();
@@ -1017,11 +1124,29 @@ impl CelestiaEngine {
                 // Reset per-video face detection cache so each video detects its own speaker during run!
                 adapted.crop.detected_face = None;
                 adapted.crop.keyframes.clear();
-                // Keep full clip auto-end when applying across different-duration videos unless user set start_ms=0 & end_ms=None
-                item.use_custom_settings = !req.update_shared;
+                if req.update_shared {
+                    adapted.overridden_tools.clear();
+                    item.use_custom_settings = false;
+                } else {
+                    if adapted.overridden_tools.is_empty() {
+                        adapted.overridden_tools = vec![
+                            "crop".into(),
+                            "subtitles".into(),
+                            "color".into(),
+                            "audio".into(),
+                            "logo".into(),
+                            "outro".into(),
+                            "output".into(),
+                        ];
+                    }
+                    item.use_custom_settings = true;
+                }
                 item.updated_at = now_iso();
                 self.db.update_batch_item(&item)?;
                 self.sync_batch_item_project(&batch, &item, Some(&adapted))?;
+            } else if req.update_shared {
+                // Propagate updated Master Control to all non-overridden sibling items too!
+                self.sync_batch_item_project(&batch, &item, None)?;
             }
         }
 

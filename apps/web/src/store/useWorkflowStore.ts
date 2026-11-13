@@ -49,7 +49,7 @@ const STUDIO_TABS = new Set<string>([
 export const useWorkflowStore = create<WorkflowState>((set) => ({
   activeProjectId: null,
   activeStep: 'upload',
-  activeStudioTab: 'logo',
+  activeStudioTab: 'trim',
   draftSettings: null,
   draftCues: [],
   cuesDirty: false,

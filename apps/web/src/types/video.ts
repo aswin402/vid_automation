@@ -152,6 +152,15 @@ export interface OutroSettings {
   normalization_mode: 'pad' | 'crop' | 'stretch';
 }
 
+export type OverridableToolId =
+  | 'crop'
+  | 'subtitles'
+  | 'color'
+  | 'audio'
+  | 'logo'
+  | 'outro'
+  | 'output';
+
 export interface EditSettings {
   schema_version: number;
   trim: TrimSettings;
@@ -163,6 +172,7 @@ export interface EditSettings {
   subtitles: SubtitlesSettings;
   outro: OutroSettings;
   audio_policy: string;
+  overridden_tools?: string[];
 }
 
 export interface Asset {

@@ -690,7 +690,7 @@ export const InteractiveVideoPreview: React.FC<InteractiveVideoPreviewProps> = (
     if (activeDragTarget === 'logo' && onDragLogo) {
       const logoW =
         logoRef.current?.offsetWidth ||
-        rect.width * (settings.logo.width_ratio || 0.14);
+        rect.width * (settings.logo.width_ratio || 0.26);
       const logoH = logoRef.current?.offsetHeight || logoW;
       const availW = Math.max(1, rect.width - logoW);
       const availH = Math.max(1, rect.height - logoH);
@@ -765,10 +765,10 @@ export const InteractiveVideoPreview: React.FC<InteractiveVideoPreviewProps> = (
       ? Math.min(Math.max(audioCfg?.voice_clarity ?? 0, 0), 1)
       : 0;
     const hpHz = isAudioActive
-      ? Math.min(Math.max(audioCfg?.highpass_hz ?? 80, 20), 300)
+      ? Math.min(Math.max(audioCfg?.highpass_hz ?? 95, 20), 300)
       : 20;
     const lpHz = isAudioActive
-      ? Math.min(Math.max(audioCfg?.lowpass_hz ?? 16000, 4000), 20000)
+      ? Math.min(Math.max(audioCfg?.lowpass_hz ?? 14000, 4000), 20000)
       : 20000;
     const volDb = isAudioActive
       ? Math.min(Math.max(audioCfg?.volume_db ?? 0, -12), 12)
@@ -1362,7 +1362,7 @@ export const InteractiveVideoPreview: React.FC<InteractiveVideoPreviewProps> = (
                   logoCfg.x_ratio,
                   logoCfg.y_ratio
                 ),
-                width: `${Math.min(Math.max(logoCfg.width_ratio || 0.14, 0.03), 0.5) * 100}%`,
+                width: `${Math.min(Math.max(logoCfg.width_ratio || 0.26, 0.03), 0.5) * 100}%`,
                 opacity: logoCfg.opacity ?? 1.0,
               }}
               title={canDragLogo ? 'Drag brand logo' : undefined}

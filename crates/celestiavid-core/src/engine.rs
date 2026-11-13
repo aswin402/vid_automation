@@ -468,7 +468,6 @@ impl CelestiaEngine {
             let mut settings = proj.settings_json;
             let mut changed = false;
             if asset.kind == "logo" && settings.logo.asset_id.as_deref() == Some(asset_id) {
-                settings.logo.enabled = false;
                 settings.logo.asset_id = None;
                 changed = true;
             }
@@ -597,11 +596,9 @@ impl CelestiaEngine {
             let _ = self.import_managed_generated(&proj.id, "outro", outro_key, "sample_outro.mp4").await?;
         }
 
-        // Configure attractive default branding (bottom-right logo + subtitles enabled)
+        // Enable subtitles on sample demo showcase while preserving default Clean Voice + custom Logo placement
         let refreshed = self.db.get_project(&proj.id)?;
         let mut settings = refreshed.settings_json;
-        settings.logo.position = "bottom-right".to_string();
-        settings.logo.width_ratio = 0.15;
         settings.subtitles.enabled = true;
         let updated = self
             .db

@@ -1,22 +1,28 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertCircle,
   ArrowLeft,
+  ArrowRight,
   CheckCircle2,
-  CheckSquare,
+  ChevronDown,
+  ChevronUp,
   Clock,
-  Download,
   Film,
+  Filter,
   FolderInput,
   FolderOutput,
   Image as ImageIcon,
   Layers,
   Loader2,
-  Play,
   Plus,
-  Square,
   Trash2,
   Upload,
   X,
@@ -24,16 +30,26 @@ import {
 import { extractApiError, isTauriDesktop, videoApi } from '@/api/videoApi';
 import { FolderImportModal } from '@/components/batch/FolderImportModal';
 import { BatchItemEditorPanel } from '@/components/batch/BatchItemEditorPanel';
+import { BatchMasterControlPanel } from '@/components/batch/BatchMasterControlPanel';
+import { BatchOutputColumn } from '@/components/batch/BatchOutputColumn';
 import { Button } from '@/components/ui/button';
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover';
-import { Switch } from '@/components/ui/switch';
 import { HintTooltip } from '@/components/ui/tooltip';
+import {
+  isToolOverriddenOnSettings,
+  mergeLiveMasterIntoRowSettings,
+  removeOverriddenTool,
+  studioTabToToolKey,
+} from '@/lib/batchSettingsMerge';
 import { formatFriendlyDuration } from '@/lib/timecode';
-import { useWorkflowStore } from '@/store/useWorkflowStore';
+import {
+  useWorkflowStore,
+  type StudioNavbarTab,
+} from '@/store/useWorkflowStore';
 import type {
   Asset,
   BatchDetail,
@@ -41,6 +57,20 @@ import type {
   BatchItemSpec,
   EditSettings,
 } from '@/types/video';
+
+const STUDIO_STEP_SEQUENCE: ReadonlyArray<{
+  id: StudioNavbarTab;
+  label: string;
+}> = [
+  { id: 'trim', label: 'Trim' },
+  { id: 'crop', label: 'Ratio & Face' },
+  { id: 'subtitles', label: 'Subtitles' },
+  { id: 'color', label: 'Color' },
+  { id: 'audio', label: 'Audio' },
+  { id: 'logo', label: 'Logo' },
+  { id: 'outro', label: 'Outro' },
+  { id: 'export', label: 'Output' },
+];
 
 function stemName(filename: string): string {
   return filename.replace(/\.[^.]+$/, '') || filename;
@@ -51,6 +81,7 @@ export const BatchStudioPage: React.FC = () => {
   const queryClient = useQueryClient();
 
   const activeStudioTab = useWorkflowStore((s) => s.activeStudioTab);
+  const setActiveStudioTab = useWorkflowStore((s) => s.setActiveStudioTab);
 
   const [showFolderModal, setShowFolderModal] = useState(false);
   const [collapsedRows, setCollapsedRows] = useState<Record<string, boolean>>(
@@ -63,9 +94,21 @@ export const BatchStudioPage: React.FC = () => {
     'source' | 'logo' | 'outro' | null
   >(null);
 
-  const [forceReexport, setForceReexport] = useState(false);
+  // Master Control live draft + debounced persistence (null = synced with batch.shared_settings)
+  const [localMasterDraft, setLocalMasterDraft] = useState<EditSettings | null>(
+    null
+  );
+  const [masterSaveState, setMasterSaveState] = useState<
+    'idle' | 'saving' | 'saved'
+  >('idle');
+
+  // Optional subset filter when user clicks "Edit #N" or "Edit Selected" in Output tab
+  const [focusedSubsetIds, setFocusedSubsetIds] = useState<string[] | null>(
+    null
+  );
+  const [steppingTab, setSteppingTab] = useState(false);
+
   const [runningBatch, setRunningBatch] = useState(false);
-  const [updatingQueue, setUpdatingQueue] = useState(false);
   const [uploadingPoolKind, setUploadingPoolKind] = useState<
     'source' | 'logo' | 'outro' | null
   >(null);
@@ -117,6 +160,74 @@ export const BatchStudioPage: React.FC = () => {
     [batchId, queryClient]
   );
 
+  // Debounced auto-save for Master Control edits (propagates to all non-overridden rows)
+  useEffect(() => {
+    if (!batchId || !localMasterDraft) return;
+    const snapshot = localMasterDraft;
+    const timer = window.setTimeout(async () => {
+      setMasterSaveState('saving');
+      try {
+        const updated = await videoApi.updateBatch(batchId, {
+          shared_settings: snapshot,
+        });
+        setBatchCache(updated);
+        setLocalMasterDraft((cur) => {
+          if (cur === snapshot) {
+            setMasterSaveState('saved');
+            return null;
+          }
+          return cur;
+        });
+      } catch (err) {
+        setMasterSaveState('idle');
+        setBannerMsg({
+          kind: 'err',
+          text: extractApiError(err, 'Failed to save Master Control settings.'),
+        });
+      }
+    }, 420);
+    return () => window.clearTimeout(timer);
+  }, [batchId, localMasterDraft, setBatchCache]);
+
+  const effectiveMasterSettings: EditSettings | undefined =
+    localMasterDraft ?? batch?.shared_settings;
+
+  const handleUpdateMaster = useCallback(
+    (updater: (prev: EditSettings) => EditSettings) => {
+      setLocalMasterDraft((prev) => {
+        const base = prev ?? batch?.shared_settings;
+        if (!base) return prev;
+        return updater(base);
+      });
+      setMasterSaveState('idle');
+    },
+    [batch?.shared_settings]
+  );
+
+  const handleEnsureMasterSubtitlesEnabled = useCallback(() => {
+    setLocalMasterDraft((prev) => {
+      const base = prev ?? batch?.shared_settings;
+      if (!base || base.subtitles.enabled) return prev;
+      setMasterSaveState('idle');
+      return {
+        ...base,
+        subtitles: { ...base.subtitles, enabled: true },
+      };
+    });
+  }, [batch?.shared_settings]);
+
+  const flushMasterDraft = async () => {
+    if (!batchId || !localMasterDraft) return;
+    setMasterSaveState('saving');
+    const snapshot = localMasterDraft;
+    const updated = await videoApi.updateBatch(batchId, {
+      shared_settings: snapshot,
+    });
+    setLocalMasterDraft(null);
+    setMasterSaveState('saved');
+    setBatchCache(updated);
+  };
+
   const bumpSyncGenForRows = (rowIds: string[]) => {
     setExternalSyncGen((prev) => {
       const next = { ...prev };
@@ -145,7 +256,7 @@ export const BatchStudioPage: React.FC = () => {
       if (!entry.dirty) continue;
       if (filter && !filter.has(rowId)) continue;
       const updated = await videoApi.updateBatchItem(batchId, rowId, {
-        use_custom_settings: true,
+        use_custom_settings: (entry.settings.overridden_tools?.length ?? 0) > 0,
         settings: entry.settings,
       });
       liveDraftsRef.current.set(rowId, {
@@ -153,6 +264,62 @@ export const BatchStudioPage: React.FC = () => {
         dirty: false,
       });
       setBatchCache(updated);
+    }
+  };
+
+  const handleResetAllRowsToMasterForTool = async () => {
+    if (!batch || !effectiveMasterSettings) return;
+    const toolKey = studioTabToToolKey(activeStudioTab);
+    if (!toolKey) return;
+
+    await flushMasterDraft();
+    const affectedIds: string[] = [];
+    let latestBatch = batch;
+
+    for (const item of batch.items) {
+      const liveEntry = liveDraftsRef.current.get(item.id);
+      const rowSettings = liveEntry?.settings ?? item.settings;
+      if (!isToolOverriddenOnSettings(rowSettings, toolKey)) continue;
+
+      const remaining = removeOverriddenTool(
+        rowSettings.overridden_tools,
+        toolKey
+      );
+      const srcAsset = item.source_asset_id
+        ? batch.videos.find((v) => v.id === item.source_asset_id)
+        : batch.videos[0];
+      const merged = mergeLiveMasterIntoRowSettings(
+        effectiveMasterSettings,
+        {
+          ...rowSettings,
+          overridden_tools: remaining,
+        },
+        {
+          hasLogoAsset: Boolean(item.logo_asset_id || batch.logos[0]),
+          hasOutroAsset: Boolean(item.outro_asset_id || batch.outros[0]),
+          sourceWidth: srcAsset?.width,
+          sourceHeight: srcAsset?.height,
+        }
+      );
+
+      latestBatch = await videoApi.updateBatchItem(batch.id, item.id, {
+        use_custom_settings: remaining.length > 0,
+        settings: merged,
+      });
+      liveDraftsRef.current.set(item.id, {
+        settings: merged,
+        dirty: false,
+      });
+      affectedIds.push(item.id);
+    }
+
+    if (affectedIds.length > 0) {
+      bumpSyncGenForRows(affectedIds);
+      setBatchCache(latestBatch);
+      setBannerMsg({
+        kind: 'ok',
+        text: `Synced ${affectedIds.length} video(s) back to Master Control.`,
+      });
     }
   };
 
@@ -213,6 +380,7 @@ export const BatchStudioPage: React.FC = () => {
     setBannerMsg(null);
     const list = Array.from(files);
     try {
+      await flushMasterDraft();
       await flushDirtyRowDrafts();
       for (const f of list) {
         await videoApi.uploadBatchPoolAsset(batchId, 'source', f);
@@ -239,6 +407,7 @@ export const BatchStudioPage: React.FC = () => {
       setUploadingPoolKind('source');
       setBannerMsg(null);
       try {
+        await flushMasterDraft();
         await flushDirtyRowDrafts();
         const imported = await videoApi.pickAndImportBatchPoolAssets(
           batchId,
@@ -302,6 +471,7 @@ export const BatchStudioPage: React.FC = () => {
     setUploadingPoolKind('logo');
     setBannerMsg(null);
     try {
+      await flushMasterDraft();
       await flushDirtyRowDrafts();
       const uploaded = await videoApi.uploadBatchPoolAsset(
         batchId,
@@ -311,7 +481,7 @@ export const BatchStudioPage: React.FC = () => {
       await applyNewSingleLogoAcrossBatch(uploaded);
       setBannerMsg({
         kind: 'ok',
-        text: `Logo "${singleFile.name}" linked.`,
+        text: `Logo "${singleFile.name}" linked across campaign.`,
       });
     } catch (err) {
       setBannerMsg({
@@ -329,6 +499,7 @@ export const BatchStudioPage: React.FC = () => {
       setUploadingPoolKind('logo');
       setBannerMsg(null);
       try {
+        await flushMasterDraft();
         await flushDirtyRowDrafts();
         const imported = await videoApi.pickAndImportBatchPoolAssets(
           batchId,
@@ -354,6 +525,7 @@ export const BatchStudioPage: React.FC = () => {
     if (!batch || !batchId || batch.logos.length === 0) return;
     setUploadingPoolKind('logo');
     try {
+      await flushMasterDraft();
       await flushDirtyRowDrafts();
       let synced = batch;
       if (batch.items.length > 0) {
@@ -425,6 +597,7 @@ export const BatchStudioPage: React.FC = () => {
     setUploadingPoolKind('outro');
     setBannerMsg(null);
     try {
+      await flushMasterDraft();
       await flushDirtyRowDrafts();
       const uploaded = await videoApi.uploadBatchPoolAsset(
         batchId,
@@ -434,7 +607,7 @@ export const BatchStudioPage: React.FC = () => {
       await applyNewSingleOutroAcrossBatch(uploaded);
       setBannerMsg({
         kind: 'ok',
-        text: `Outro "${singleFile.name}" linked.`,
+        text: `Outro "${singleFile.name}" linked across campaign.`,
       });
     } catch (err) {
       setBannerMsg({
@@ -452,6 +625,7 @@ export const BatchStudioPage: React.FC = () => {
       setUploadingPoolKind('outro');
       setBannerMsg(null);
       try {
+        await flushMasterDraft();
         await flushDirtyRowDrafts();
         const imported = await videoApi.pickAndImportBatchPoolAssets(
           batchId,
@@ -477,6 +651,7 @@ export const BatchStudioPage: React.FC = () => {
     if (!batch || !batchId || batch.outros.length === 0) return;
     setUploadingPoolKind('outro');
     try {
+      await flushMasterDraft();
       await flushDirtyRowDrafts();
       let synced = batch;
       if (batch.items.length > 0) {
@@ -514,7 +689,6 @@ export const BatchStudioPage: React.FC = () => {
 
   const handleDeleteRow = async (rowId: string) => {
     if (!batch) return;
-    setUpdatingQueue(true);
     try {
       const targetRow = batch.items.find((i) => i.id === rowId);
       liveDraftsRef.current.delete(rowId);
@@ -533,142 +707,165 @@ export const BatchStudioPage: React.FC = () => {
           targetRow.source_asset_id
         );
       }
+      if (focusedSubsetIds) {
+        const remainingFocused = focusedSubsetIds.filter((id) => id !== rowId);
+        setFocusedSubsetIds(
+          remainingFocused.length > 0 ? remainingFocused : null
+        );
+      }
       setBatchCache(updated);
     } catch (err) {
       setBannerMsg({
         kind: 'err',
         text: extractApiError(err, 'Failed to remove video row.'),
       });
-    } finally {
-      setUpdatingQueue(false);
     }
   };
 
-  const handleBulkSelectRows = async (mode: 'all' | 'none') => {
-    if (!batch || batch.items.length === 0) return;
-    setUpdatingQueue(true);
+  // Step-by-step Save & Next / Back navigation
+  const handleSaveAndStepTo = async (targetTab: StudioNavbarTab) => {
+    setSteppingTab(true);
+    setBannerMsg(null);
     try {
-      const nextSpecs = batch.items.map((item) => ({
-        ...existingItemToSpec(item),
-        selected: mode === 'all',
-      }));
-      const updated = await videoApi.setBatchItems(batch.id, nextSpecs);
-      setBatchCache(updated);
+      await flushMasterDraft();
+      await flushDirtyRowDrafts();
+      setActiveStudioTab(targetTab);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
       setBannerMsg({
         kind: 'err',
-        text: extractApiError(err, 'Failed to update selection.'),
+        text: extractApiError(err, 'Could not save current edits before stepping.'),
       });
     } finally {
-      setUpdatingQueue(false);
+      setSteppingTab(false);
     }
   };
 
-  const handleApplyCardEditsToSelected = async (
-    sourceRowNumber: number,
-    settings: EditSettings
-  ) => {
-    if (!batch) return;
-    const targetIds = selectedQueueItems.map((i) => i.id);
-    if (targetIds.length === 0) {
-      const updated = await videoApi.updateBatch(batch.id, {
-        shared_settings: settings,
-      });
-      setBatchCache(updated);
-      return;
-    }
-
-    const updated = await videoApi.applySettingsToBatchItems(
-      batch.id,
-      targetIds,
-      settings,
-      true
-    );
-    for (const tid of targetIds) {
-      const refreshedRow = updated.items.find((r) => r.id === tid);
-      if (refreshedRow) {
-        liveDraftsRef.current.set(tid, {
-          settings: refreshedRow.settings,
-          dirty: false,
-        });
-      }
-    }
-    bumpSyncGenForRows(targetIds);
-    setBatchCache(updated);
-    setBannerMsg({
-      kind: 'ok',
-      text: `Copied Row #${sourceRowNumber} settings to ${targetIds.length} selected row(s).`,
-    });
-  };
-
-  const handleExportSingleRow = async (
-    rowId: string,
-    latestSettings: EditSettings
-  ) => {
-    if (!batch) return;
-    await videoApi.updateBatchItem(batch.id, rowId, {
-      use_custom_settings: true,
-      settings: latestSettings,
-    });
-    liveDraftsRef.current.set(rowId, {
-      settings: latestSettings,
-      dirty: false,
-    });
-
-    const resp = await videoApi.runBatchAutomation(batch.id, [rowId], true);
-    setBatchCache(resp.batch);
-    const rowNum = batch.items.findIndex((i) => i.id === rowId) + 1;
-    const isAnotherRunning = resp.batch.items.some(
-      (i) => i.id !== rowId && i.status === 'processing'
-    );
-    setBannerMsg({
-      kind: 'ok',
-      text: isAnotherRunning
-        ? `Row #${rowNum} queued next.`
-        : `Rendering Row #${rowNum}.`,
-    });
-  };
-
-  const handleRunBulkQueue = async () => {
-    if (!batch) return;
-    const ids = selectedQueueItems.map((i) => i.id);
-    if (ids.length === 0) {
-      setBannerMsg({
-        kind: 'err',
-        text: 'Select at least 1 row to export.',
-      });
-      return;
-    }
-
+  // Output Tab — Queue & Export ALL videos sequentially 1-by-1
+  const handleExportAllQueue = async () => {
+    if (!batch || batch.items.length === 0) return;
     setRunningBatch(true);
     setBannerMsg(null);
     try {
-      await flushDirtyRowDrafts(ids);
-      const resp = await videoApi.runBatchAutomation(
-        batch.id,
-        ids,
-        forceReexport
-      );
+      await flushMasterDraft();
+      await flushDirtyRowDrafts();
+
+      const allIds = batch.items.map((i) => i.id);
+      if (batch.items.some((i) => !i.selected)) {
+        const nextSpecs = batch.items.map((item) => ({
+          ...existingItemToSpec(item),
+          selected: true,
+        }));
+        const selectedAllBatch = await videoApi.setBatchItems(
+          batch.id,
+          nextSpecs
+        );
+        setBatchCache(selectedAllBatch);
+      }
+
+      const resp = await videoApi.runBatchAutomation(batch.id, allIds, true);
       setBatchCache(resp.batch);
+      setFocusedSubsetIds(null);
       setBannerMsg({
         kind: 'ok',
-        text:
-          resp.launched_count > 0
-            ? `Queued ${resp.launched_count} video(s).`
-            : 'Selected rows already rendered. Enable Re-export to overwrite.',
+        text: `Queued all ${resp.launched_count} video(s) for sequential 1-by-1 rendering.`,
       });
     } catch (err) {
       setBannerMsg({
         kind: 'err',
-        text: extractApiError(err, 'Failed to launch export queue.'),
+        text: extractApiError(err, 'Failed to start sequential export queue.'),
       });
     } finally {
       setRunningBatch(false);
     }
   };
 
-  const handleDownloadReadyOutputs = async () => {
+  // Output Tab — Queue & Export ONLY selected subset sequentially 1-by-1
+  const handleExportSelectedQueue = async (itemIds: string[]) => {
+    if (!batch || itemIds.length === 0) return;
+    setRunningBatch(true);
+    setBannerMsg(null);
+    try {
+      await flushMasterDraft();
+      await flushDirtyRowDrafts(itemIds);
+
+      const resp = await videoApi.runBatchAutomation(batch.id, itemIds, true);
+      setBatchCache(resp.batch);
+      setBannerMsg({
+        kind: 'ok',
+        text: `Queued ${resp.launched_count} selected video(s) for sequential rendering.`,
+      });
+    } catch (err) {
+      setBannerMsg({
+        kind: 'err',
+        text: extractApiError(err, 'Failed to queue selected video export.'),
+      });
+    } finally {
+      setRunningBatch(false);
+    }
+  };
+
+  // Output Tab — Isolate specific video(s) to edit again without touching others
+  const handleEditVideosSubset = async (itemIds: string[]) => {
+    if (!batch || itemIds.length === 0) return;
+    setBannerMsg(null);
+    try {
+      const targetSet = new Set(itemIds);
+      const nextSpecs = batch.items.map((item) => ({
+        ...existingItemToSpec(item),
+        selected: targetSet.has(item.id),
+      }));
+      const updated = await videoApi.setBatchItems(batch.id, nextSpecs);
+      setBatchCache(updated);
+      setFocusedSubsetIds(itemIds);
+      setCollapsedRows((prev) => {
+        const next = { ...prev };
+        for (const id of itemIds) {
+          next[id] = false;
+        }
+        return next;
+      });
+      setActiveStudioTab('trim');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (err) {
+      setBannerMsg({
+        kind: 'err',
+        text: extractApiError(err, 'Could not isolate selected video(s) for editing.'),
+      });
+    }
+  };
+
+  const handleDownloadOrSaveReady = async () => {
     if (!batch) return;
+    if (batch.output_dir) {
+      setExportingFolder(true);
+      setBannerMsg(null);
+      try {
+        const ids =
+          selectedQueueItems.length > 0 &&
+          selectedQueueItems.length < batch.items.length
+            ? selectedQueueItems.map((i) => i.id)
+            : undefined;
+        const resp = await videoApi.exportBatchOutputsToFolder(
+          batch.id,
+          batch.output_dir,
+          ids
+        );
+        setBannerMsg({
+          kind: 'ok',
+          text: `Saved ${resp.exported_count} MP4(s) to ${resp.dest_dir}`,
+        });
+      } catch (err) {
+        setBannerMsg({
+          kind: 'err',
+          text: extractApiError(err, 'Failed to save MP4s to output folder.'),
+        });
+      } finally {
+        setExportingFolder(false);
+      }
+      return;
+    }
+
     const targetPool =
       selectedQueueItems.length > 0 ? selectedQueueItems : batch.items;
     const readyRows = targetPool.filter((i) => i.output_asset !== null);
@@ -704,7 +901,10 @@ export const BatchStudioPage: React.FC = () => {
         resolvedExportDestDir.trim(),
         ids.length > 0 ? ids : undefined
       );
-      await videoApi.updateBatch(batch.id, { output_dir: resp.dest_dir });
+      const updated = await videoApi.updateBatch(batch.id, {
+        output_dir: resp.dest_dir,
+      });
+      setBatchCache(updated);
       setBannerMsg({
         kind: 'ok',
         text: `Saved ${resp.exported_count} MP4(s) to ${resp.dest_dir}`,
@@ -720,7 +920,25 @@ export const BatchStudioPage: React.FC = () => {
     }
   };
 
-  if (isLoading || !batch) {
+  const handlePickOutputFolderDesktop = async () => {
+    if (!batch) return;
+    const dir = await videoApi.pickLocalFolderPath('Choose Export Folder');
+    if (!dir) return;
+    setExportDestDir(dir);
+    const updated = await videoApi.updateBatch(batch.id, { output_dir: dir });
+    setBatchCache(updated);
+  };
+
+  const handleClearOutputFolder = async () => {
+    if (!batch) return;
+    setExportDestDir('');
+    const updated = await videoApi.updateBatch(batch.id, {
+      clear_output_dir: true,
+    });
+    setBatchCache(updated);
+  };
+
+  if (isLoading || !batch || !effectiveMasterSettings) {
     return (
       <div className="max-w-7xl mx-auto px-6 py-16 flex items-center justify-center gap-2.5 text-xs text-muted-foreground">
         <Loader2 className="h-4 w-4 animate-spin text-primary" />
@@ -739,9 +957,6 @@ export const BatchStudioPage: React.FC = () => {
   const completedItems = batch.items.filter(
     (i) => i.status === 'completed' && i.output_asset !== null
   );
-  const completedSelectedCount = selectedQueueItems.filter(
-    (i) => i.output_asset !== null
-  ).length;
   const isQueueActive = Boolean(
     currentlyRenderingItem || queuedItems.length > 0
   );
@@ -758,6 +973,26 @@ export const BatchStudioPage: React.FC = () => {
     { code: 'es', name: 'Spanish' },
     { code: 'fr', name: 'French' },
   ];
+
+  const currentStepIndex = Math.max(
+    0,
+    STUDIO_STEP_SEQUENCE.findIndex((s) => s.id === activeStudioTab)
+  );
+  const prevStep =
+    currentStepIndex > 0 ? STUDIO_STEP_SEQUENCE[currentStepIndex - 1] : null;
+  const nextStep =
+    currentStepIndex < STUDIO_STEP_SEQUENCE.length - 1
+      ? STUDIO_STEP_SEQUENCE[currentStepIndex + 1]
+      : null;
+
+  const focusedSet = focusedSubsetIds ? new Set(focusedSubsetIds) : null;
+  const visibleRowsWithIndex = batch.items
+    .map((row, idx) => ({ row, rowNumber: idx + 1 }))
+    .filter(({ row }) => (focusedSet ? focusedSet.has(row.id) : true));
+
+  const allVisibleCollapsed =
+    visibleRowsWithIndex.length > 0 &&
+    visibleRowsWithIndex.every(({ row }) => Boolean(collapsedRows[row.id]));
 
   const scrollToRow = (rowId: string) => {
     setCollapsedRows((prev) => ({ ...prev, [rowId]: false }));
@@ -802,7 +1037,7 @@ export const BatchStudioPage: React.FC = () => {
         className="hidden"
       />
 
-      {/* Sleek Compact Media Dock (60-30-10, Zero Verbose Paragraphs) */}
+      {/* Sleek Compact Media Dock (60-30-10) */}
       <div className="rounded-xl bg-card border border-border p-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2.5 min-w-0">
           <HintTooltip label="Back to Workspace" side="bottom">
@@ -951,7 +1186,7 @@ export const BatchStudioPage: React.FC = () => {
             ) : (
               <HintTooltip
                 label="Upload Single Brand Logo"
-                detail="Drop or pick PNG / WebP / JPG watermark applied to rows"
+                detail="Drop or pick PNG / WebP / JPG watermark applied by default (26% at 89%, 68%)"
                 side="bottom"
               >
                 <Button
@@ -1064,7 +1299,7 @@ export const BatchStudioPage: React.FC = () => {
                   size="sm"
                 >
                   <FolderOutput className="h-3.5 w-3.5" />
-                  <span className="hidden sm:inline">Output</span>
+                  <span className="hidden sm:inline">Folder</span>
                 </Button>
               </PopoverTrigger>
             </HintTooltip>
@@ -1148,176 +1383,7 @@ export const BatchStudioPage: React.FC = () => {
         </div>
       )}
 
-      {/* Sticky Quick-Jump & Queue Control Bar */}
-      {batch.items.length > 0 && (
-        <div className="sticky top-14 z-30 rounded-xl bg-background/92 backdrop-blur-xl border border-border p-2.5 shadow-sm space-y-2">
-          <div className="flex flex-wrap items-center justify-between gap-2.5">
-            {/* Row Jump Chips */}
-            <div className="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-full">
-              {batch.items.map((row, idx) => {
-                const rNum = idx + 1;
-                const rowPct = Math.round((row.progress ?? 0) * 100);
-                const chipClass =
-                  row.status === 'processing'
-                    ? 'bg-primary text-primary-foreground border-primary animate-pulse'
-                    : row.status === 'queued'
-                    ? 'bg-secondary text-foreground border-border'
-                    : row.status === 'completed' && row.output_asset
-                    ? 'bg-card text-foreground border-emerald-500/45'
-                    : row.status === 'failed'
-                    ? 'bg-destructive/10 text-destructive border-destructive/40'
-                    : row.selected
-                    ? 'bg-card hover:bg-muted text-foreground border-primary/40'
-                    : 'bg-card/50 text-muted-foreground border-border';
-
-                return (
-                  <HintTooltip
-                    key={row.id}
-                    label={`Row #${rNum}: ${row.title}`}
-                    detail={`Status: ${row.status}`}
-                    side="bottom"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => scrollToRow(row.id)}
-                      className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border text-[11px] font-mono font-semibold transition-all shrink-0 ${chipClass}`}
-                    >
-                      <span>#{rNum}</span>
-                      {row.status === 'processing' && (
-                        <span className="text-[10px]">{rowPct}%</span>
-                      )}
-                      {row.status === 'queued' && (
-                        <Clock className="h-2.5 w-2.5 text-muted-foreground" />
-                      )}
-                      {row.status === 'completed' && row.output_asset && (
-                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                      )}
-                    </button>
-                  </HintTooltip>
-                );
-              })}
-            </div>
-
-            {/* Selection + Sequential Export Controls */}
-            <div className="flex flex-wrap items-center gap-2 ml-auto">
-              <div className="flex items-center gap-1 border-r border-border pr-2">
-                <HintTooltip label="Select all rows" side="bottom">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="xs"
-                    disabled={updatingQueue}
-                    onClick={() => void handleBulkSelectRows('all')}
-                  >
-                    <CheckSquare className="h-3 w-3" />
-                    All
-                  </Button>
-                </HintTooltip>
-                <HintTooltip label="Deselect all rows" side="bottom">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="xs"
-                    disabled={updatingQueue}
-                    onClick={() => void handleBulkSelectRows('none')}
-                    className="text-muted-foreground"
-                  >
-                    <Square className="h-3 w-3" />
-                    None
-                  </Button>
-                </HintTooltip>
-              </div>
-
-              <HintTooltip
-                label="Force Re-export"
-                detail="Re-render rows that already have a completed MP4"
-                side="bottom"
-              >
-                <label className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground cursor-pointer px-1">
-                  <Switch
-                    checked={forceReexport}
-                    onCheckedChange={setForceReexport}
-                  />
-                  <span>Re-export</span>
-                </label>
-              </HintTooltip>
-
-              {(completedSelectedCount > 0 || completedItems.length > 0) && (
-                <HintTooltip
-                  label="Download Finished MP4s"
-                  detail="Save rendered videos locally"
-                  side="bottom"
-                >
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void handleDownloadReadyOutputs()}
-                  >
-                    <Download className="h-3.5 w-3.5" />
-                    <span>
-                      Download (
-                      {completedSelectedCount > 0
-                        ? completedSelectedCount
-                        : completedItems.length}
-                      )
-                    </span>
-                  </Button>
-                </HintTooltip>
-              )}
-
-              <HintTooltip
-                label="Export Selected Queue"
-                detail="Renders checked rows sequentially one by one"
-                side="bottom"
-              >
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={runningBatch || selectedQueueItems.length === 0}
-                  onClick={() => void handleRunBulkQueue()}
-                >
-                  {runningBatch ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Play className="h-3.5 w-3.5 fill-current" />
-                  )}
-                  <span>Export Queue ({selectedQueueItems.length})</span>
-                </Button>
-              </HintTooltip>
-            </div>
-          </div>
-
-          {isQueueActive && (
-            <div className="rounded-lg bg-muted/60 border border-border px-3 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px]">
-              <div className="flex items-center gap-2 font-medium">
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />
-                {currentlyRenderingItem ? (
-                  <span>
-                    Row #
-                    {batch.items.findIndex(
-                      (i) => i.id === currentlyRenderingItem.id
-                    ) + 1}{' '}
-                    · {currentlyRenderingItem.title} (
-                    {Math.round((currentlyRenderingItem.progress ?? 0) * 100)}%)
-                  </span>
-                ) : (
-                  <span>Starting next queued video...</span>
-                )}
-              </div>
-
-              <div className="flex items-center gap-3 font-mono text-muted-foreground">
-                <span>Waiting: {queuedItems.length}</span>
-                <span>
-                  Done: {completedItems.length}/{batch.items.length}
-                </span>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Empty Queue State vs Stacked Row Workbenches */}
+      {/* Empty Queue State */}
       {batch.items.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-border bg-card/40 py-14 px-6 text-center space-y-3">
           <div className="h-10 w-10 rounded-xl bg-secondary flex items-center justify-center text-primary mx-auto">
@@ -1344,49 +1410,417 @@ export const BatchStudioPage: React.FC = () => {
             </Button>
           </div>
         </div>
-      ) : (
+      ) : activeStudioTab === 'export' ? (
+        /* ==================== DEDICATED OUTPUT TAB ==================== */
         <div className="space-y-4">
-          {batch.items.map((row, idx) => {
-            const queueIndex =
-              row.status === 'queued'
-                ? queuedItems.findIndex((q) => q.id === row.id) + 1
-                : null;
-            const syncGen = externalSyncGen[row.id] || 0;
+          {prevStep && (
+            <div className="flex items-center justify-between">
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                onClick={() => void handleSaveAndStepTo(prevStep.id)}
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                Back to {prevStep.label}
+              </Button>
+              {focusedSubsetIds && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="xs"
+                  onClick={() => setFocusedSubsetIds(null)}
+                  className="text-muted-foreground"
+                >
+                  Clear Subset Filter
+                </Button>
+              )}
+            </div>
+          )}
 
-            return (
-              <BatchItemEditorPanel
-                key={`${row.id}:sync-${syncGen}`}
-                batch={batch}
-                item={row}
-                rowNumber={idx + 1}
-                activeTab={activeStudioTab}
-                queueWaitingPosition={queueIndex}
-                selectedItemIds={selectedQueueItems.map((i) => i.id)}
-                isCollapsed={Boolean(collapsedRows[row.id])}
-                onToggleCollapse={() =>
-                  setCollapsedRows((prev) => ({
-                    ...prev,
-                    [row.id]: !prev[row.id],
-                  }))
+          <BatchOutputColumn
+            batch={batch}
+            masterSettings={effectiveMasterSettings}
+            runningBatch={runningBatch}
+            exportingFolder={exportingFolder}
+            isDesktop={isTauriDesktop()}
+            onUpdateMaster={handleUpdateMaster}
+            onBatchUpdated={setBatchCache}
+            onExportAllQueue={handleExportAllQueue}
+            onExportSelectedQueue={handleExportSelectedQueue}
+            onEditVideosSubset={handleEditVideosSubset}
+            onPickOutputFolder={handlePickOutputFolderDesktop}
+            onClearOutputFolder={handleClearOutputFolder}
+            onDownloadOrSaveReady={handleDownloadOrSaveReady}
+          />
+        </div>
+      ) : (
+        /* ==================== EDITING TABS (STEP-BY-STEP + MASTER CONTROL) ==================== */
+        <div className="space-y-4">
+          {/* Sticky Row Jump + Save & Next Bar (Zero Export/Re-export Clutter) */}
+          <div className="sticky top-14 z-30 rounded-xl bg-background/92 backdrop-blur-xl border border-border p-2.5 shadow-sm space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2.5">
+              {/* Row Jump Chips */}
+              <div className="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-full">
+                {visibleRowsWithIndex.map(({ row, rowNumber }) => {
+                  const rowPct = Math.round((row.progress ?? 0) * 100);
+                  const chipClass =
+                    row.status === 'processing'
+                      ? 'bg-primary text-primary-foreground border-primary animate-pulse'
+                      : row.status === 'queued'
+                      ? 'bg-secondary text-foreground border-border'
+                      : row.status === 'completed' && row.output_asset
+                      ? 'bg-card text-foreground border-emerald-500/45'
+                      : row.status === 'failed'
+                      ? 'bg-destructive/10 text-destructive border-destructive/40'
+                      : 'bg-card hover:bg-muted text-foreground border-border';
+
+                  return (
+                    <HintTooltip
+                      key={row.id}
+                      label={`Jump to Video #${rowNumber}: ${row.title}`}
+                      side="bottom"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => scrollToRow(row.id)}
+                        className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border text-[11px] font-mono font-semibold transition-all shrink-0 ${chipClass}`}
+                      >
+                        <span>#{rowNumber}</span>
+                        {row.status === 'processing' && (
+                          <span className="text-[10px]">{rowPct}%</span>
+                        )}
+                        {row.status === 'queued' && (
+                          <Clock className="h-2.5 w-2.5 text-muted-foreground" />
+                        )}
+                        {row.status === 'completed' && row.output_asset && (
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                        )}
+                      </button>
+                    </HintTooltip>
+                  );
+                })}
+              </div>
+
+              {/* Step Navigation Controls (Back + Save & Next) */}
+              <div className="flex flex-wrap items-center gap-2 ml-auto">
+                <span className="text-[11px] font-mono text-muted-foreground hidden md:inline">
+                  Step {currentStepIndex + 1}/{STUDIO_STEP_SEQUENCE.length}
+                </span>
+
+                {prevStep && (
+                  <HintTooltip
+                    label={`Back to ${prevStep.label}`}
+                    detail="Saves edits and returns to the previous step"
+                    side="bottom"
+                  >
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={steppingTab}
+                      onClick={() => void handleSaveAndStepTo(prevStep.id)}
+                    >
+                      <ArrowLeft className="h-3.5 w-3.5" />
+                      <span className="hidden sm:inline">{prevStep.label}</span>
+                    </Button>
+                  </HintTooltip>
+                )}
+
+                {focusedSubsetIds && (
+                  <HintTooltip
+                    label="Finish Editing Selected Video(s)"
+                    detail="Saves separate edits and returns directly to Output so you can Export Selected"
+                    side="bottom"
+                  >
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={steppingTab}
+                      onClick={() => void handleSaveAndStepTo('export')}
+                    >
+                      <span>
+                        Output ({focusedSubsetIds.length} Selected)
+                      </span>
+                      <ArrowRight className="h-3.5 w-3.5" />
+                    </Button>
+                  </HintTooltip>
+                )}
+
+                {nextStep && (
+                  <HintTooltip
+                    label={`Save & Continue to ${nextStep.label}`}
+                    detail="Automatically saves Master Control & per-video edits and opens the next tool"
+                    side="bottom"
+                  >
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={steppingTab}
+                      onClick={() => void handleSaveAndStepTo(nextStep.id)}
+                    >
+                      {steppingTab ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : null}
+                      <span>Save & Next: {nextStep.label}</span>
+                      <ArrowRight className="h-3.5 w-3.5" />
+                    </Button>
+                  </HintTooltip>
+                )}
+              </div>
+            </div>
+
+            {isQueueActive && (
+              <div className="rounded-lg bg-muted/60 border border-border px-3 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                <div className="flex items-center gap-2 font-medium">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />
+                  {currentlyRenderingItem ? (
+                    <span>
+                      Rendering #
+                      {batch.items.findIndex(
+                        (i) => i.id === currentlyRenderingItem.id
+                      ) + 1}{' '}
+                      · {currentlyRenderingItem.title} (
+                      {Math.round((currentlyRenderingItem.progress ?? 0) * 100)}
+                      %)
+                    </span>
+                  ) : (
+                    <span>Starting next queued video...</span>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-3 font-mono text-muted-foreground">
+                  <span>Waiting: {queuedItems.length}</span>
+                  <span>
+                    Done: {completedItems.length}/{batch.items.length}
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Isolated Subset Editing Banner OR Master Control Panel */}
+          {focusedSubsetIds ? (
+            <div className="rounded-2xl border border-primary/40 bg-primary/8 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 text-xs">
+                <Filter className="h-4 w-4 text-primary shrink-0" />
+                <div>
+                  <span className="font-semibold text-foreground">
+                    Editing Selected Video
+                    {focusedSubsetIds.length === 1 ? '' : 's'} Alone (
+                    {visibleRowsWithIndex
+                      .map((v) => `#${v.rowNumber}`)
+                      .join(', ')}
+                    )
+                  </span>
+                  <span className="text-muted-foreground ml-2">
+                    Changes made below apply separately to{' '}
+                    {focusedSubsetIds.length === 1
+                      ? 'this video'
+                      : 'these videos'}{' '}
+                    without affecting other videos.
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="xs"
+                  onClick={() => setFocusedSubsetIds(null)}
+                >
+                  Show All Videos ({batch.items.length})
+                </Button>
+                <Button
+                  type="button"
+                  size="xs"
+                  onClick={() => void handleSaveAndStepTo('export')}
+                >
+                  Go to Output & Export ({focusedSubsetIds.length})
+                  <ArrowRight className="h-3 w-3" />
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <BatchMasterControlPanel
+              batch={batch}
+              activeTab={activeStudioTab}
+              masterSettings={effectiveMasterSettings}
+              saveState={masterSaveState}
+              allowedFonts={allowedFonts}
+              supportedLanguages={supportedLanguages}
+              singleLogoAsset={singleLogoAsset}
+              singleOutroAsset={singleOutroAsset}
+              uploadingSingleSlot={
+                uploadingPoolKind === 'logo' || uploadingPoolKind === 'outro'
+                  ? uploadingPoolKind
+                  : null
+              }
+              onUpdateMaster={handleUpdateMaster}
+              onResetAllRowsToMasterForTool={handleResetAllRowsToMasterForTool}
+              onBatchUpdated={setBatchCache}
+              onUploadGlobalSlot={(kind, files) => {
+                if (kind === 'logo') {
+                  void handleSingleLogoFiles(files);
+                } else {
+                  void handleSingleOutroFiles(files);
                 }
-                allowedFonts={allowedFonts}
-                supportedLanguages={supportedLanguages}
-                singleLogoAsset={singleLogoAsset}
-                singleOutroAsset={singleOutroAsset}
-                uploadingSingleKind={uploadingPoolKind}
-                onTriggerSingleLogoUpload={handleTriggerSingleLogoUpload}
-                onRemoveSingleLogo={handleRemoveSingleLogo}
-                onTriggerSingleOutroUpload={handleTriggerSingleOutroUpload}
-                onRemoveSingleOutro={handleRemoveSingleOutro}
-                getLiveSettingsForRow={getLiveSettingsForRow}
-                onLiveDraftChange={handleLiveDraftChange}
-                onApplyToSelectedRows={handleApplyCardEditsToSelected}
-                onExportSingleRow={handleExportSingleRow}
-                onDeleteRow={handleDeleteRow}
-                onBatchUpdated={setBatchCache}
-              />
-            );
-          })}
+              }}
+              onDesktopPickGlobalSlot={(kind) => {
+                if (kind === 'logo') {
+                  void handleTriggerSingleLogoUpload();
+                } else {
+                  void handleTriggerSingleOutroUpload();
+                }
+              }}
+              onRemoveGlobalSlot={(kind) => {
+                if (kind === 'logo') {
+                  void handleRemoveSingleLogo();
+                } else {
+                  void handleRemoveSingleOutro();
+                }
+              }}
+              isDesktop={isTauriDesktop()}
+            />
+          )}
+
+          {/* Per-Video Workbench Section Header */}
+          {activeStudioTab !== 'trim' && !focusedSubsetIds && (
+            <div className="flex items-center justify-between px-1 pt-1">
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <span className="font-semibold text-foreground">
+                  Individual Videos ({visibleRowsWithIndex.length})
+                </span>
+                <span>·</span>
+                <span>
+                  Inherits Master Control automatically — edit any video below
+                  to customize it separately
+                </span>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                onClick={() => {
+                  const shouldCollapse = !allVisibleCollapsed;
+                  setCollapsedRows((prev) => {
+                    const next = { ...prev };
+                    for (const { row } of visibleRowsWithIndex) {
+                      next[row.id] = shouldCollapse;
+                    }
+                    return next;
+                  });
+                }}
+              >
+                {allVisibleCollapsed ? (
+                  <>
+                    <ChevronDown className="h-3 w-3" />
+                    Expand All
+                  </>
+                ) : (
+                  <>
+                    <ChevronUp className="h-3 w-3" />
+                    Collapse All
+                  </>
+                )}
+              </Button>
+            </div>
+          )}
+
+          {/* Stacked Per-Video Workbenches */}
+          <div className="space-y-4">
+            {visibleRowsWithIndex.map(({ row, rowNumber }) => {
+              const queueIndex =
+                row.status === 'queued'
+                  ? queuedItems.findIndex((q) => q.id === row.id) + 1
+                  : null;
+              const syncGen = externalSyncGen[row.id] || 0;
+
+              return (
+                <BatchItemEditorPanel
+                  key={`${row.id}:sync-${syncGen}`}
+                  batch={batch}
+                  item={row}
+                  rowNumber={rowNumber}
+                  activeTab={activeStudioTab}
+                  masterSettings={effectiveMasterSettings}
+                  queueWaitingPosition={queueIndex}
+                  isCollapsed={Boolean(collapsedRows[row.id])}
+                  onToggleCollapse={() =>
+                    setCollapsedRows((prev) => ({
+                      ...prev,
+                      [row.id]: !prev[row.id],
+                    }))
+                  }
+                  allowedFonts={allowedFonts}
+                  supportedLanguages={supportedLanguages}
+                  singleLogoAsset={singleLogoAsset}
+                  singleOutroAsset={singleOutroAsset}
+                  uploadingSingleKind={uploadingPoolKind}
+                  onTriggerSingleLogoUpload={handleTriggerSingleLogoUpload}
+                  onRemoveSingleLogo={handleRemoveSingleLogo}
+                  onTriggerSingleOutroUpload={handleTriggerSingleOutroUpload}
+                  onRemoveSingleOutro={handleRemoveSingleOutro}
+                  onEnsureMasterSubtitlesEnabled={
+                    handleEnsureMasterSubtitlesEnabled
+                  }
+                  getLiveSettingsForRow={getLiveSettingsForRow}
+                  onLiveDraftChange={handleLiveDraftChange}
+                  onDeleteRow={handleDeleteRow}
+                  onBatchUpdated={setBatchCache}
+                />
+              );
+            })}
+          </div>
+
+          {/* Bottom Step Footer so user doesn't need to scroll back up */}
+          <div className="rounded-xl bg-card border border-border px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              {prevStep && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={steppingTab}
+                  onClick={() => void handleSaveAndStepTo(prevStep.id)}
+                >
+                  <ArrowLeft className="h-3.5 w-3.5" />
+                  Back: {prevStep.label}
+                </Button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              {focusedSubsetIds && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={steppingTab}
+                  onClick={() => void handleSaveAndStepTo('export')}
+                >
+                  Save & Go to Output ({focusedSubsetIds.length})
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </Button>
+              )}
+              {nextStep && (
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={steppingTab}
+                  onClick={() => void handleSaveAndStepTo(nextStep.id)}
+                >
+                  {steppingTab ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : null}
+                  Save & Next: {nextStep.label}
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </Button>
+              )}
+            </div>
+          </div>
         </div>
       )}
 

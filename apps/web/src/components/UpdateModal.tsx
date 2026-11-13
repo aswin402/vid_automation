@@ -129,7 +129,7 @@ export const UpdateModal: React.FC<UpdateModalProps> = ({
     updateCheck?.current_version ??
     systemVersionQuery.data?.current_version ??
     liveUpdateStatus?.current_version ??
-    '0.2.2';
+    '0.2.3';
 
   const status = liveUpdateStatus?.status ?? 'idle';
   const running = isUpdateRunning(status);

@@ -1,4 +1,4 @@
-# CelestiaVid — Native Desktop AI Video Studio (`v0.2.2`)
+# CelestiaVid — Native Desktop AI Video Studio (`v0.2.3`)
 
 Single-binary **Tauri v2 + Pure Native Rust** desktop studio and asynchronous FFmpeg media pipeline that transforms raw local videos into finished, color-graded, noise-cleaned, logo-branded, AI-subtitled MP4 videos — with **zero Python runtime dependencies**.
 
@@ -60,9 +60,9 @@ Single-binary **Tauri v2 + Pure Native Rust** desktop studio and asynchronous FF
 
 ### 2. Direct Download — Prebuilt Desktop Installers (Windows, Linux, macOS)
 Every tagged release (`v0.2.0+`) automatically builds standalone desktop installers via [`.github/workflows/release-desktop.yml`](.github/workflows/release-desktop.yml) and publishes them on [**GitHub Releases**](https://github.com/aswin402/vid_automation/releases):
-- **Windows 10 / 11 (x64)**: `CelestiaVid_0.2.2_x64-setup.exe` (NSIS per-user installer — no Admin required) & `CelestiaVid_0.2.2_x64_en-US.msi` — **includes `ffmpeg.exe` & `ffprobe.exe` pre-bundled out of the box!**
-- **Linux (x64)**: `CelestiaVid_0.2.2_amd64.deb` & `CelestiaVid_0.2.2_amd64.AppImage` (with static `ffmpeg` & `ffprobe` bundled)
-- **macOS (Apple Silicon)**: `CelestiaVid_0.2.2_aarch64.dmg`
+- **Windows 10 / 11 (x64)**: `CelestiaVid_0.2.3_x64-setup.exe` (NSIS per-user installer — no Admin required) & `CelestiaVid_0.2.3_x64_en-US.msi` — **includes `ffmpeg.exe` & `ffprobe.exe` pre-bundled out of the box!**
+- **Linux (x64)**: `CelestiaVid_0.2.3_amd64.deb` & `CelestiaVid_0.2.3_amd64.AppImage` (with static `ffmpeg` & `ffprobe` bundled)
+- **macOS (Apple Silicon)**: `CelestiaVid_0.2.3_aarch64.dmg`
 
 ### Build From Source — Prerequisites
 - **Rust** (`rustup`, `cargo` 1.80+), **CMake**, **Clang** (`libclang` for `whisper-rs`)
@@ -111,4 +111,4 @@ just test
 - [`docs/PRD.md`](docs/PRD.md) — Product Requirements Document
 - [`docs/DESIGN.md`](docs/DESIGN.md) — UI/UX design system & studio layout specification
 - [`docs/TECHNICAL_SPEC.md`](docs/TECHNICAL_SPEC.md) — Media filtergraphs & architecture specification
-- [`CHANGELOG.md`](CHANGELOG.md) — Release history (`v0.2.2`, `v0.2.1`, `v0.2.0`, `v0.0.1`)
+- [`CHANGELOG.md`](CHANGELOG.md) — Release history (`v0.2.3`, `v0.2.2`, `v0.2.1`, `v0.2.0`, `v0.0.1`)

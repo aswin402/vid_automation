@@ -146,7 +146,7 @@ const AUDIO_SLIDERS: readonly AudioSliderDescriptor[] = [
     min: 0.0,
     max: 1.0,
     step: 0.02,
-    defaultValue: 0.0,
+    defaultValue: 0.45,
     formatDisplay: (v) =>
       v <= 0.01 ? 'Off (0%)' : `${Math.round(v * 100)}% (-${(10 + v * 38).toFixed(0)} dB)`,
   },
@@ -156,7 +156,7 @@ const AUDIO_SLIDERS: readonly AudioSliderDescriptor[] = [
     min: 0.0,
     max: 1.0,
     step: 0.02,
-    defaultValue: 0.0,
+    defaultValue: 0.35,
     formatDisplay: (v) =>
       v <= 0.01 ? 'Flat (0%)' : `${Math.round(v * 100)}% (+${(v * 6.5).toFixed(1)} dB)`,
   },
@@ -166,7 +166,7 @@ const AUDIO_SLIDERS: readonly AudioSliderDescriptor[] = [
     min: 20,
     max: 300,
     step: 5,
-    defaultValue: 80,
+    defaultValue: 95,
     formatDisplay: (v) => `${Math.round(v)} Hz`,
   },
   {
@@ -175,7 +175,7 @@ const AUDIO_SLIDERS: readonly AudioSliderDescriptor[] = [
     min: 4000,
     max: 20000,
     step: 250,
-    defaultValue: 16000,
+    defaultValue: 14000,
     formatDisplay: (v) => `${(v / 1000).toFixed(1)} kHz`,
   },
   {
@@ -184,7 +184,7 @@ const AUDIO_SLIDERS: readonly AudioSliderDescriptor[] = [
     min: -12.0,
     max: 12.0,
     step: 0.5,
-    defaultValue: 0.0,
+    defaultValue: 1.5,
     formatDisplay: (v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`,
   },
 ];
@@ -206,14 +206,14 @@ export const AudioEnhancementStep: React.FC<AudioEnhancementStepProps> = ({
   const [isPreviewFullscreen, setIsPreviewFullscreen] = useState(false);
 
   const audio: AudioEnhancementSettings = settings.audio_enhancement || {
-    enabled: false,
-    preset: 'neutral',
-    noise_reduction: 0.0,
-    voice_clarity: 0.0,
-    highpass_hz: 80,
-    lowpass_hz: 16000,
-    volume_db: 0.0,
-    normalize_loudness: false,
+    enabled: true,
+    preset: 'clean_voice',
+    noise_reduction: 0.45,
+    voice_clarity: 0.35,
+    highpass_hz: 95,
+    lowpass_hz: 14000,
+    volume_db: 1.5,
+    normalize_loudness: true,
     apply_to_transcription: true,
   };
 
@@ -242,14 +242,14 @@ export const AudioEnhancementStep: React.FC<AudioEnhancementStepProps> = ({
   };
 
   const handleResetFlat = () => {
-    const flat = AUDIO_PRESETS[0];
+    const cleanDefault = AUDIO_PRESETS[1];
     onUpdateSettings((prev) => ({
       ...prev,
       audio_enhancement: {
         ...prev.audio_enhancement,
-        enabled: false,
-        preset: 'neutral',
-        ...flat.values,
+        enabled: true,
+        preset: 'clean_voice',
+        ...cleanDefault.values,
         apply_to_transcription: true,
       },
     }));
@@ -338,8 +338,12 @@ export const AudioEnhancementStep: React.FC<AudioEnhancementStepProps> = ({
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
           {AUDIO_PRESETS.map((preset) => {
             const isSelected =
-              audio.preset === preset.id &&
-              (preset.id === 'neutral' ? !audio.enabled : audio.enabled);
+              preset.id === 'neutral'
+                ? !audio.enabled
+                : audio.enabled &&
+                  (audio.preset === preset.id ||
+                    (preset.id === 'clean_voice' &&
+                      (!audio.preset || audio.preset === 'none')));
             return (
               <button
                 key={preset.id}

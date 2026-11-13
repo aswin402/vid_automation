@@ -36,7 +36,78 @@ impl Database {
             conn: Arc::new(Mutex::new(conn)),
         };
         db.init_schema()?;
+        db.migrate_v2_settings_defaults()?;
         Ok(db)
+    }
+
+    pub fn migrate_v2_settings_defaults(&self) -> AppResult<()> {
+        let conn = self.conn.lock();
+
+        let mut batch_updates: Vec<(String, String)> = Vec::new();
+        {
+            let mut stmt =
+                conn.prepare("SELECT id, shared_settings_json FROM batches")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (id, raw) = row?;
+                let mut settings: EditSettings =
+                    serde_json::from_str(&raw).unwrap_or_default();
+                if settings.upgrade_to_v2_defaults() {
+                    if let Ok(serialized) = serde_json::to_string(&settings) {
+                        batch_updates.push((id, serialized));
+                    }
+                }
+            }
+        }
+
+        let mut project_updates: Vec<(String, String)> = Vec::new();
+        {
+            let mut stmt =
+                conn.prepare("SELECT id, settings_json FROM projects")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (id, raw) = row?;
+                let mut settings: EditSettings =
+                    serde_json::from_str(&raw).unwrap_or_default();
+                if settings.upgrade_to_v2_defaults() {
+                    if let Ok(serialized) = serde_json::to_string(&settings) {
+                        project_updates.push((id, serialized));
+                    }
+                }
+            }
+        }
+
+        if !batch_updates.is_empty() || !project_updates.is_empty() {
+            conn.execute_batch("BEGIN IMMEDIATE;")?;
+            let res: Result<(), rusqlite::Error> = (|| {
+                for (id, json) in &batch_updates {
+                    conn.execute(
+                        "UPDATE batches SET shared_settings_json = ?1 WHERE id = ?2",
+                        params![json, id],
+                    )?;
+                }
+                for (id, json) in &project_updates {
+                    conn.execute(
+                        "UPDATE projects SET settings_json = ?1 WHERE id = ?2",
+                        params![json, id],
+                    )?;
+                }
+                Ok(())
+            })();
+            match res {
+                Ok(()) => conn.execute_batch("COMMIT;")?,
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    return Err(e.into());
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn init_schema(&self) -> AppResult<()> {
@@ -176,7 +247,8 @@ impl Database {
                 params![project_id],
                 |r| {
                     let settings_raw: String = r.get(4)?;
-                    let settings: EditSettings = serde_json::from_str(&settings_raw).unwrap_or_default();
+                    let mut settings: EditSettings = serde_json::from_str(&settings_raw).unwrap_or_default();
+                    settings.upgrade_to_v2_defaults();
                     Ok(ProjectRecord {
                         id: r.get(0)?,
                         owner_id: r.get(1)?,
@@ -202,7 +274,8 @@ impl Database {
         )?;
         let iter = stmt.query_map(params![DEFAULT_OWNER_ID], |r| {
             let settings_raw: String = r.get(4)?;
-            let settings: EditSettings = serde_json::from_str(&settings_raw).unwrap_or_default();
+            let mut settings: EditSettings = serde_json::from_str(&settings_raw).unwrap_or_default();
+            settings.upgrade_to_v2_defaults();
             Ok(ProjectRecord {
                 id: r.get(0)?,
                 owner_id: r.get(1)?,
@@ -649,7 +722,8 @@ impl Database {
 
     fn row_to_batch(r: &rusqlite::Row<'_>) -> rusqlite::Result<BatchRecord> {
         let settings_raw: String = r.get(4)?;
-        let shared_settings: EditSettings = serde_json::from_str(&settings_raw).unwrap_or_default();
+        let mut shared_settings: EditSettings = serde_json::from_str(&settings_raw).unwrap_or_default();
+        shared_settings.upgrade_to_v2_defaults();
         Ok(BatchRecord {
             id: r.get(0)?,
             owner_id: r.get(1)?,
@@ -1024,6 +1098,8 @@ impl Database {
         )?;
         let batches: i64 =
             conn.query_row("SELECT COUNT(*) FROM batches", [], |r| r.get(0))?;
+        drop(conn);
+        self.migrate_v2_settings_defaults()?;
         Ok((projects.max(0) as usize, batches.max(0) as usize))
     }
 }

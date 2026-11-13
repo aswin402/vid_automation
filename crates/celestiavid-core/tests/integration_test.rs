@@ -89,6 +89,15 @@ fn test_color_and_audio_filter_builders() {
 
     assert_eq!(build_audio_enhancement_filter(None), None);
     let mut audio = AudioEnhancementSettings::default();
+    assert!(audio.enabled, "Clean Voice audio must be enabled by default");
+    assert_eq!(audio.preset, "clean_voice");
+    let default_af =
+        build_audio_enhancement_filter(Some(&audio)).expect("default clean_voice audio filter");
+    assert!(default_af.contains("highpass=f=95"));
+    assert!(default_af.contains("lowpass=f=14000"));
+    assert!(default_af.contains("afftdn="));
+
+    audio.enabled = false;
     assert_eq!(build_audio_enhancement_filter(Some(&audio)), None);
 
     audio.enabled = true;
@@ -107,6 +116,15 @@ fn test_color_and_audio_filter_builders() {
     assert!(af.contains("equalizer=f=3000"));
     assert!(af.contains("acompressor="));
     assert!(af.contains("volume=2.00dB"));
+
+    let logo_def = celestiavid_core::models::LogoSettings::default();
+    assert!(logo_def.enabled);
+    assert_eq!(logo_def.x_ratio, Some(0.89));
+    assert_eq!(logo_def.y_ratio, Some(0.68));
+    assert!((logo_def.width_ratio - 0.26).abs() < 1e-6);
+    assert!((logo_def.opacity - 1.0).abs() < 1e-6);
+    assert!((logo_def.margin_ratio - 0.03).abs() < 1e-6);
+    assert!(!logo_def.apply_to_outro);
 }
 
 #[test]
@@ -888,6 +906,52 @@ async fn test_batch_folder_import_pairing_and_selective_automation_e2e() {
         applied.items[1].settings.logo.asset_id
     );
 
+    // 5b. Verify per-tool Separate Video Override vs Master Control inheritance!
+    let mut row2_sep = applied.items[1].settings.clone();
+    row2_sep.overridden_tools = vec!["color".into()];
+    row2_sep.color_correction.saturation = 1.45;
+    let after_sep = engine
+        .update_batch_item(
+            &batch.id,
+            &row2_id,
+            BatchItemUpdateRequest {
+                title: None,
+                selected: None,
+                source_asset_id: None,
+                logo_asset_id: None,
+                clear_logo: false,
+                outro_asset_id: None,
+                clear_outro: false,
+                use_custom_settings: None,
+                settings: Some(row2_sep),
+            },
+        )
+        .expect("set row2 separate color override");
+    assert!(after_sep.items[1].use_custom_settings);
+
+    // Update Master Control logo width -> BOTH row #1 and row #2 must inherit new Master logo width (0.24),
+    // while row #2 keeps its separate color saturation (1.45) and row #1 gets Master saturation (1.05)!
+    let mut master_next = after_sep.shared_settings.clone();
+    master_next.logo.width_ratio = 0.24;
+    master_next.color_correction.saturation = 1.05;
+    let after_master = engine
+        .update_batch(
+            &batch.id,
+            celestiavid_core::models::BatchUpdateRequest {
+                name: None,
+                mapping_mode: None,
+                output_dir: None,
+                clear_output_dir: false,
+                shared_settings: Some(master_next),
+                apply_shared_to_selected: false,
+            },
+        )
+        .expect("update master shared_settings");
+    assert!((after_master.items[0].settings.logo.width_ratio - 0.24).abs() < 1e-6);
+    assert!((after_master.items[1].settings.logo.width_ratio - 0.24).abs() < 1e-6);
+    assert!((after_master.items[0].settings.color_correction.saturation - 1.05).abs() < 1e-6);
+    assert!((after_master.items[1].settings.color_correction.saturation - 1.45).abs() < 1e-6);
+
     // 6. Run batch automation on selected set (`item_ids: None` defaults to `selected == true`)
     let run_resp = engine
         .run_batch_automation(
@@ -1156,4 +1220,88 @@ async fn test_app_data_backup_restore_and_auto_update_pipeline() {
     std::env::remove_var("CELESTIAVID_UPDATE_MANIFEST_URL");
     std::env::remove_var("CELESTIAVID_UPDATER_STAGE_ONLY");
     server_handle.abort();
+}
+
+#[tokio::test]
+async fn test_default_clean_voice_and_logo_placement_across_new_and_legacy_records() {
+    use celestiavid_core::models::{BatchItemSpec, BatchSetItemsRequest, EditSettings};
+
+    let tmp = TempDir::new().unwrap();
+    let data_dir = tmp.path().join("app_data");
+    let engine = CelestiaEngine::open(&data_dir, None).unwrap();
+
+    // 1. Verify brand-new project defaults
+    let proj = engine.create_project("Fresh Default Check").unwrap();
+    assert!(proj.settings_json.audio_enhancement.enabled);
+    assert_eq!(proj.settings_json.audio_enhancement.preset, "clean_voice");
+    assert!((proj.settings_json.audio_enhancement.noise_reduction - 0.45).abs() < 1e-6);
+    assert!((proj.settings_json.audio_enhancement.voice_clarity - 0.35).abs() < 1e-6);
+    assert_eq!(proj.settings_json.audio_enhancement.highpass_hz, 95);
+    assert_eq!(proj.settings_json.audio_enhancement.lowpass_hz, 14000);
+    assert!((proj.settings_json.audio_enhancement.volume_db - 1.5).abs() < 1e-6);
+    assert!(proj.settings_json.audio_enhancement.normalize_loudness);
+    assert!(proj.settings_json.audio_enhancement.apply_to_transcription);
+
+    assert!(proj.settings_json.logo.enabled);
+    assert_eq!(proj.settings_json.logo.position, "bottom-right");
+    assert_eq!(proj.settings_json.logo.x_ratio, Some(0.89));
+    assert_eq!(proj.settings_json.logo.y_ratio, Some(0.68));
+    assert!((proj.settings_json.logo.width_ratio - 0.26).abs() < 1e-6);
+    assert!((proj.settings_json.logo.opacity - 1.0).abs() < 1e-6);
+    assert!((proj.settings_json.logo.margin_ratio - 0.03).abs() < 1e-6);
+    assert!(!proj.settings_json.logo.apply_to_outro);
+
+    // 2. Verify batch + batch items keep logo.enabled = true & Clean Voice even before a logo is uploaded
+    let batch = engine.create_batch("Campaign Default Check").unwrap();
+    let updated_batch = engine
+        .set_batch_items(
+            &batch.id,
+            BatchSetItemsRequest {
+                mapping_mode: Some("many_videos_one_brand".into()),
+                items: vec![BatchItemSpec {
+                    id: None,
+                    selected: true,
+                    title: Some("Clip 1".into()),
+                    source_asset_id: None,
+                    logo_asset_id: None,
+                    outro_asset_id: None,
+                    use_custom_settings: Some(false),
+                }],
+            },
+        )
+        .unwrap();
+    let row = &updated_batch.items[0];
+    assert!(row.settings.audio_enhancement.enabled);
+    assert_eq!(row.settings.audio_enhancement.preset, "clean_voice");
+    assert!(row.settings.logo.enabled);
+    assert_eq!(row.settings.logo.x_ratio, Some(0.89));
+    assert_eq!(row.settings.logo.y_ratio, Some(0.68));
+    assert!((row.settings.logo.width_ratio - 0.26).abs() < 1e-6);
+    assert!(!row.settings.logo.apply_to_outro);
+
+    // 3. Verify legacy v1 JSON records upgrade cleanly on Database::open
+    let mut legacy_v1 = EditSettings::default();
+    legacy_v1.schema_version = 1;
+    legacy_v1.audio_enhancement.enabled = false;
+    legacy_v1.audio_enhancement.preset = "none".into();
+    legacy_v1.audio_enhancement.noise_reduction = 0.0;
+    legacy_v1.logo.enabled = false;
+    legacy_v1.logo.x_ratio = None;
+    legacy_v1.logo.y_ratio = None;
+    legacy_v1.logo.width_ratio = 0.14;
+    engine
+        .db
+        .update_project(&proj.id, None, None, Some(&legacy_v1), None, None)
+        .unwrap();
+    drop(engine);
+
+    let reopened = CelestiaEngine::open(&data_dir, None).unwrap();
+    let upgraded = reopened.get_project_detail(&proj.id).unwrap();
+    assert_eq!(upgraded.settings_json.schema_version, 2);
+    assert!(upgraded.settings_json.audio_enhancement.enabled);
+    assert_eq!(upgraded.settings_json.audio_enhancement.preset, "clean_voice");
+    assert!(upgraded.settings_json.logo.enabled);
+    assert_eq!(upgraded.settings_json.logo.x_ratio, Some(0.89));
+    assert_eq!(upgraded.settings_json.logo.y_ratio, Some(0.68));
+    assert!((upgraded.settings_json.logo.width_ratio - 0.26).abs() < 1e-6);
 }
