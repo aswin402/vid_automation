@@ -1,11 +1,20 @@
 import React from 'react';
+import { useLocation } from 'react-router-dom';
 
 export const Footer: React.FC = () => {
+  const { pathname } = useLocation();
+  const isStudioRoute =
+    pathname.startsWith('/batches/') || pathname.startsWith('/projects/');
+
+  if (isStudioRoute) {
+    return null;
+  }
+
   return (
-    <footer className="border-t border-border/60 py-4 px-6 text-center text-xs text-muted-foreground bg-card/30">
-      <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
-        <span>CelestiaVid AI Video Automation Platform · Guided FFmpeg & ASS Subtitle Pipeline</span>
-        <span className="font-mono text-[11px]">MP4 (H.264 / AAC / libass)</span>
+    <footer className="border-t border-border/60 py-4 text-[11px] text-muted-foreground">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 flex items-center justify-between gap-2">
+        <span>CelestiaVid</span>
+        <span className="font-mono">FFmpeg · Whisper · Local-first</span>
       </div>
     </footer>
   );

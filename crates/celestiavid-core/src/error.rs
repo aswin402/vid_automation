@@ -44,6 +44,10 @@ impl AppError {
         Self::new("FORBIDDEN", message, 403)
     }
 
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self::new("BAD_REQUEST", message, 400)
+    }
+
     pub fn validation(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self::new(code, message, 400)
     }

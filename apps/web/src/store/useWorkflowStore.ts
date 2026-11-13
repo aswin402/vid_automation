@@ -1,9 +1,20 @@
 import { create } from 'zustand';
 import type { EditSettings, SubtitleCue, WorkflowStepId } from '@/types/video';
 
+export type StudioNavbarTab =
+  | 'trim'
+  | 'crop'
+  | 'subtitles'
+  | 'color'
+  | 'audio'
+  | 'logo'
+  | 'outro'
+  | 'export';
+
 interface WorkflowState {
   activeProjectId: string | null;
   activeStep: WorkflowStepId;
+  activeStudioTab: StudioNavbarTab;
   draftSettings: EditSettings | null;
   draftCues: SubtitleCue[];
   cuesDirty: boolean;
@@ -14,6 +25,7 @@ interface WorkflowState {
 
   setActiveProjectId: (projectId: string | null) => void;
   setActiveStep: (step: WorkflowStepId) => void;
+  setActiveStudioTab: (tab: StudioNavbarTab) => void;
   setDraftSettings: (settings: EditSettings, markDirty?: boolean) => void;
   updateDraftSettings: (updater: (prev: EditSettings) => EditSettings) => void;
   setDraftCues: (cues: SubtitleCue[], markDirty?: boolean) => void;
@@ -23,9 +35,21 @@ interface WorkflowState {
   markCuesSaved: () => void;
 }
 
+const STUDIO_TABS = new Set<string>([
+  'trim',
+  'crop',
+  'subtitles',
+  'color',
+  'audio',
+  'logo',
+  'outro',
+  'export',
+]);
+
 export const useWorkflowStore = create<WorkflowState>((set) => ({
   activeProjectId: null,
   activeStep: 'upload',
+  activeStudioTab: 'logo',
   draftSettings: null,
   draftCues: [],
   cuesDirty: false,
@@ -49,7 +73,18 @@ export const useWorkflowStore = create<WorkflowState>((set) => ({
         activeJobId: null,
       };
     }),
-  setActiveStep: (step) => set({ activeStep: step }),
+  setActiveStep: (step) =>
+    set((state) => ({
+      activeStep: step,
+      activeStudioTab: STUDIO_TABS.has(step)
+        ? (step as StudioNavbarTab)
+        : state.activeStudioTab,
+    })),
+  setActiveStudioTab: (tab) =>
+    set({
+      activeStudioTab: tab,
+      activeStep: tab,
+    }),
   setDraftSettings: (settings, markDirty = false) =>
     set((state) => ({
       draftSettings: structuredClone(settings),

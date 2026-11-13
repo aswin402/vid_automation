@@ -9,6 +9,7 @@ import {
   VolumeX,
 } from 'lucide-react';
 import { isTauriDesktop, videoApi } from '@/api/videoApi';
+import { resolveTargetOutputDimensions } from '@/lib/cropMath';
 import { formatBytes, formatFriendlyDuration } from '@/lib/timecode';
 import type { Asset, EditSettings } from '@/types/video';
 
@@ -38,6 +39,13 @@ export const OutroStep: React.FC<OutroStepProps> = ({
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const outroCfg = settings.outro;
+  const targetOutDims = resolveTargetOutputDimensions(
+    settings.crop,
+    sourceAsset?.width || 1280,
+    sourceAsset?.height || 720,
+    settings.output?.width,
+    settings.output?.height
+  );
 
   const handleUploadOutro = async (file: File) => {
     setUploading(true);
@@ -91,7 +99,7 @@ export const OutroStep: React.FC<OutroStepProps> = ({
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border pb-4">
         <div>
-          <h2 className="text-lg font-bold">Step 7: Outro Attachment (Optional)</h2>
+          <h2 className="text-lg font-bold">Step 8: Outro Attachment (Optional)</h2>
           <p className="text-xs text-muted-foreground">
             Append a standard brand outro after your edited main clip. Automatically normalized to match resolution, frame rate, and audio.
           </p>
@@ -137,6 +145,8 @@ export const OutroStep: React.FC<OutroStepProps> = ({
               crossOrigin="anonymous"
               controls
               playsInline
+              disablePictureInPicture
+              disableRemotePlayback
               className="w-full max-h-[360px] rounded-xl bg-black border border-border object-contain"
             />
           ) : (
@@ -236,7 +246,7 @@ export const OutroStep: React.FC<OutroStepProps> = ({
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Target Match (Main Clip):</span>
                 <span className="font-mono text-indigo-400">
-                  {sourceAsset?.width || 1280}×{sourceAsset?.height || 720} (yuv420p)
+                  {targetOutDims.width}×{targetOutDims.height} (yuv420p)
                 </span>
               </div>
               <div className="flex justify-between">

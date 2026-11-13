@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [0.2.2] - 2026-11-13
+
+### Added — Multi-Video Batch Automation, AI Face Framing, Auto-Updater & Full Screen Floating Studio
+- **Batch Campaign Automation Studio (`BatchStudioPage.tsx`, `BatchItemEditorPanel.tsx`, `FolderImportModal.tsx`, `crates/celestiavid-core/src/batch.rs`)**:
+  - Multi-video upload and local folder import with single global brand logo & outro binding, flexible row pairing (`N:1:1`, `1:1:1` index-matched, or Cartesian matrix), scrollable stacked row cards (`Row #1`, `Row #2`, ...), 1-click **Inherit Edits** from any row or copy-to-all-selected, and sequential bulk queue or single-row MP4 rendering.
+- **Aspect Ratio, Interactive Crop & Local AI Face Framing (`CropFrameStep.tsx`, `cropMath.ts`, `crates/celestiavid-core/src/media/crop.rs`)**:
+  - Target aspect-ratio presets (`9:16` Shorts/Reels, `1:1` Square, `4:5` Portrait, `16:9` Widescreen, `4:3`, `21:9`, and Custom) with `crop` (fill frame) and `pad` (letterbox) fit modes, camera zoom, and pan controls.
+  - Embedded **UltraFace RFB-320 ONNX (`tract-onnx`)** neural face detector for 100% offline primary-speaker framing with rule-of-thirds headroom and smooth dynamic speaker-tracking keyframes.
+- **Full Screen Floating Edit Studio & Clean Player Transport (`InteractiveVideoPreview.tsx`, `popover.tsx`, `tooltip.tsx`)**:
+  - Added **Side / Wide View** and **Full Screen (`F`)** controls directly after the Volume button and blocked browser-injected Picture-in-Picture overlays (`disablePictureInPicture`, `disableRemotePlayback`, `pointer-events-none`) across all `<video>` players.
+  - Added a glassmorphic **Full Screen Floating Edit HUD** featuring a top 8-tool switcher pill bar (`Trim`, `Ratio & Face`, `Subtitles`, `Color`, `Audio`, `Logo`, `Outro`, `Output`), A/B original compare, and a draggable, Left/Right-dockable, collapsible `Floating Editor` inspector panel with fullscreen-aware Radix tooltips and popovers.
+- **In-App Auto-Updater, Data Backup Snapshots & Minimal Terminal TUI Installers (`UpdateModal.tsx`, `crates/celestiavid-core/src/updater.rs`, `install.sh`, `install.ps1`, `install.cmd`)**:
+  - Live GitHub Releases version check in the navbar, 1-click animated in-app update pipeline, automatic pre-update SQLite + project metadata backup snapshots, and 1-click backup creation/restore.
+  - Redesigned minimal cross-platform TUI installers (`install.sh`, `install.ps1`, `install.cmd`) with clean step indicators, smooth Braille spinners, transfer progress bars, and seamless upgrade detection.
+
+### Changed — Minimal 60–30–10 shadcn/ui Design System
+- **Studio UI & Custom Controls (`index.css`, `Navbar.tsx`, `number-input.tsx`, `slider.tsx`, `switch.tsx`, `badge.tsx`)**:
+  - Refactored workspace and studio editors to a strict **60% dark canvas / 30% elevated slate surfaces / 10% electric indigo accent** palette with contextual `HintTooltip` hover hints, top navbar studio tool tabs, and custom themed `NumberInput` up/down steppers replacing native browser spinbuttons.
+
+---
+
 ## [0.2.1] - 2026-11-11
 
 ### Fixed — Audio Noise Reduction & Studio Settings Persistence

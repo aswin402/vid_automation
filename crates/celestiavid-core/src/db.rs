@@ -1,6 +1,7 @@
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    AssetRecord, EditSettings, ProcessingJobRecord, ProjectRecord, SubtitleCueItem,
+    AssetRecord, BatchItemRecord, BatchRecord, EditSettings, ProcessingJobRecord, ProjectRecord,
+    SubtitleCueItem,
 };
 use chrono::Utc;
 use parking_lot::Mutex;
@@ -11,6 +12,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 pub const DEFAULT_OWNER_ID: &str = "local-desktop-user";
+pub const BATCH_LIBRARY_OWNER_ID: &str = "batch-library";
+pub const BATCH_ITEM_OWNER_ID: &str = "batch-item";
 
 pub fn now_iso() -> String {
     Utc::now().to_rfc3339()
@@ -108,12 +111,49 @@ impl Database {
                 updated_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS ix_jobs_project_status ON processing_jobs(project_id, status);
+
+            CREATE TABLE IF NOT EXISTS batches (
+                id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                library_project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                shared_settings_json TEXT NOT NULL,
+                mapping_mode TEXT NOT NULL DEFAULT 'one_to_one',
+                output_dir TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS batch_items (
+                id TEXT PRIMARY KEY,
+                batch_id TEXT NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                selected INTEGER NOT NULL DEFAULT 1,
+                title TEXT NOT NULL,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                source_asset_id TEXT,
+                logo_asset_id TEXT,
+                outro_asset_id TEXT,
+                use_custom_settings INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_batch_items_batch_order ON batch_items(batch_id, sort_order);
             "#,
         )?;
         Ok(())
     }
 
     pub fn create_project(&self, name: &str, settings: &EditSettings) -> AppResult<ProjectRecord> {
+        self.create_project_with_owner(DEFAULT_OWNER_ID, name, settings)
+    }
+
+    pub fn create_project_with_owner(
+        &self,
+        owner_id: &str,
+        name: &str,
+        settings: &EditSettings,
+    ) -> AppResult<ProjectRecord> {
         let id = Uuid::new_v4().to_string();
         let now = now_iso();
         let settings_str = serde_json::to_string(settings)?;
@@ -121,7 +161,7 @@ impl Database {
         conn.execute(
             "INSERT INTO projects (id, owner_id, name, status, settings_json, active_subtitle_version, detected_language, created_at, updated_at)
              VALUES (?1, ?2, ?3, 'draft', ?4, 0, NULL, ?5, ?6)",
-            params![id, DEFAULT_OWNER_ID, name.trim(), settings_str, now, now],
+            params![id, owner_id, name.trim(), settings_str, now, now],
         )?;
         drop(conn);
         self.get_project(&id)
@@ -158,9 +198,9 @@ impl Database {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT id, owner_id, name, status, settings_json, active_subtitle_version, detected_language, created_at, updated_at
-             FROM projects ORDER BY updated_at DESC",
+             FROM projects WHERE owner_id = ?1 ORDER BY updated_at DESC",
         )?;
-        let iter = stmt.query_map([], |r| {
+        let iter = stmt.query_map(params![DEFAULT_OWNER_ID], |r| {
             let settings_raw: String = r.get(4)?;
             let settings: EditSettings = serde_json::from_str(&settings_raw).unwrap_or_default();
             Ok(ProjectRecord {
@@ -373,6 +413,32 @@ impl Database {
         Ok(())
     }
 
+    pub fn list_project_assets_asc(&self, project_id: &str) -> AppResult<Vec<AssetRecord>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, kind, status, storage_key, original_filename, mime_type,
+                    size_bytes, duration_ms, width, height, video_codec, audio_codec,
+                    frame_rate, pixel_format, has_audio, checksum, created_at
+             FROM assets WHERE project_id = ?1 ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let iter = stmt.query_map(params![project_id], Self::row_to_asset)?;
+        let mut out = Vec::new();
+        for item in iter {
+            out.push(item?);
+        }
+        Ok(out)
+    }
+
+    pub fn count_storage_key_refs(&self, storage_key: &str) -> AppResult<usize> {
+        let conn = self.conn.lock();
+        let cnt: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM assets WHERE storage_key = ?1",
+            params![storage_key],
+            |r| r.get(0),
+        )?;
+        Ok(cnt.max(0) as usize)
+    }
+
     pub fn count_subtitle_cues(&self, project_id: &str, version: i64) -> AppResult<usize> {
         if version <= 0 {
             return Ok(0);
@@ -579,5 +645,385 @@ impl Database {
             out.push(item?);
         }
         Ok(out)
+    }
+
+    fn row_to_batch(r: &rusqlite::Row<'_>) -> rusqlite::Result<BatchRecord> {
+        let settings_raw: String = r.get(4)?;
+        let shared_settings: EditSettings = serde_json::from_str(&settings_raw).unwrap_or_default();
+        Ok(BatchRecord {
+            id: r.get(0)?,
+            owner_id: r.get(1)?,
+            name: r.get(2)?,
+            library_project_id: r.get(3)?,
+            shared_settings_json: shared_settings,
+            mapping_mode: r.get(5)?,
+            output_dir: r.get(6)?,
+            created_at: r.get(7)?,
+            updated_at: r.get(8)?,
+        })
+    }
+
+    pub fn create_batch(
+        &self,
+        name: &str,
+        library_project_id: &str,
+        shared_settings: &EditSettings,
+    ) -> AppResult<BatchRecord> {
+        let id = Uuid::new_v4().to_string();
+        let now = now_iso();
+        let settings_str = serde_json::to_string(shared_settings)?;
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO batches (id, owner_id, name, library_project_id, shared_settings_json, mapping_mode, output_dir, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'one_to_one', NULL, ?6, ?7)",
+            params![id, DEFAULT_OWNER_ID, name.trim(), library_project_id, settings_str, now, now],
+        )?;
+        drop(conn);
+        self.get_batch(&id)
+    }
+
+    pub fn get_batch(&self, batch_id: &str) -> AppResult<BatchRecord> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT id, owner_id, name, library_project_id, shared_settings_json, mapping_mode, output_dir, created_at, updated_at
+             FROM batches WHERE id = ?1",
+            params![batch_id],
+            Self::row_to_batch,
+        )
+        .optional()?
+        .ok_or_else(|| AppError::not_found("Batch automation workspace not found."))
+    }
+
+    pub fn list_batches(&self) -> AppResult<Vec<BatchRecord>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, owner_id, name, library_project_id, shared_settings_json, mapping_mode, output_dir, created_at, updated_at
+             FROM batches WHERE owner_id = ?1 ORDER BY updated_at DESC",
+        )?;
+        let iter = stmt.query_map(params![DEFAULT_OWNER_ID], Self::row_to_batch)?;
+        let mut out = Vec::new();
+        for item in iter {
+            out.push(item?);
+        }
+        Ok(out)
+    }
+
+    pub fn update_batch(
+        &self,
+        batch_id: &str,
+        name: Option<&str>,
+        mapping_mode: Option<&str>,
+        output_dir: Option<Option<&str>>,
+        shared_settings: Option<&EditSettings>,
+    ) -> AppResult<BatchRecord> {
+        let mut current = self.get_batch(batch_id)?;
+        if let Some(n) = name {
+            if !n.trim().is_empty() {
+                current.name = n.trim().to_string();
+            }
+        }
+        if let Some(mm) = mapping_mode {
+            current.mapping_mode = mm.trim().to_string();
+        }
+        if let Some(od_opt) = output_dir {
+            current.output_dir = od_opt
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
+        if let Some(ss) = shared_settings {
+            current.shared_settings_json = ss.clone();
+        }
+        current.updated_at = now_iso();
+        let settings_str = serde_json::to_string(&current.shared_settings_json)?;
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE batches
+             SET name = ?1, shared_settings_json = ?2, mapping_mode = ?3, output_dir = ?4, updated_at = ?5
+             WHERE id = ?6",
+            params![
+                current.name,
+                settings_str,
+                current.mapping_mode,
+                current.output_dir,
+                current.updated_at,
+                batch_id
+            ],
+        )?;
+        Ok(current)
+    }
+
+    pub fn touch_batch(&self, batch_id: &str) -> AppResult<()> {
+        let now = now_iso();
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE batches SET updated_at = ?1 WHERE id = ?2",
+            params![now, batch_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_batch(&self, batch_id: &str) -> AppResult<()> {
+        let conn = self.conn.lock();
+        let affected = conn.execute("DELETE FROM batches WHERE id = ?1", params![batch_id])?;
+        if affected == 0 {
+            return Err(AppError::not_found("Batch automation workspace not found."));
+        }
+        Ok(())
+    }
+
+    fn row_to_batch_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<BatchItemRecord> {
+        let sort_i64: i64 = r.get(2)?;
+        let sel_i64: i64 = r.get(3)?;
+        let custom_i64: i64 = r.get(9)?;
+        Ok(BatchItemRecord {
+            id: r.get(0)?,
+            batch_id: r.get(1)?,
+            sort_order: sort_i64.max(0) as usize,
+            selected: sel_i64 != 0,
+            title: r.get(4)?,
+            project_id: r.get(5)?,
+            source_asset_id: r.get(6)?,
+            logo_asset_id: r.get(7)?,
+            outro_asset_id: r.get(8)?,
+            use_custom_settings: custom_i64 != 0,
+            created_at: r.get(10)?,
+            updated_at: r.get(11)?,
+        })
+    }
+
+    pub fn insert_batch_item(&self, item: &BatchItemRecord) -> AppResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO batch_items (
+                id, batch_id, sort_order, selected, title, project_id,
+                source_asset_id, logo_asset_id, outro_asset_id, use_custom_settings,
+                created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                item.id,
+                item.batch_id,
+                item.sort_order as i64,
+                if item.selected { 1 } else { 0 },
+                item.title,
+                item.project_id,
+                item.source_asset_id,
+                item.logo_asset_id,
+                item.outro_asset_id,
+                if item.use_custom_settings { 1 } else { 0 },
+                item.created_at,
+                item.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_batch_item(&self, item: &BatchItemRecord) -> AppResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE batch_items SET
+                sort_order = ?1, selected = ?2, title = ?3,
+                source_asset_id = ?4, logo_asset_id = ?5, outro_asset_id = ?6,
+                use_custom_settings = ?7, updated_at = ?8
+             WHERE id = ?9",
+            params![
+                item.sort_order as i64,
+                if item.selected { 1 } else { 0 },
+                item.title,
+                item.source_asset_id,
+                item.logo_asset_id,
+                item.outro_asset_id,
+                if item.use_custom_settings { 1 } else { 0 },
+                item.updated_at,
+                item.id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_batch_item(&self, item_id: &str) -> AppResult<BatchItemRecord> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT id, batch_id, sort_order, selected, title, project_id,
+                    source_asset_id, logo_asset_id, outro_asset_id, use_custom_settings,
+                    created_at, updated_at
+             FROM batch_items WHERE id = ?1",
+            params![item_id],
+            Self::row_to_batch_item,
+        )
+        .optional()?
+        .ok_or_else(|| AppError::not_found("Batch item not found."))
+    }
+
+    pub fn list_batch_items(&self, batch_id: &str) -> AppResult<Vec<BatchItemRecord>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, batch_id, sort_order, selected, title, project_id,
+                    source_asset_id, logo_asset_id, outro_asset_id, use_custom_settings,
+                    created_at, updated_at
+             FROM batch_items WHERE batch_id = ?1 ORDER BY sort_order ASC, created_at ASC",
+        )?;
+        let iter = stmt.query_map(params![batch_id], Self::row_to_batch_item)?;
+        let mut out = Vec::new();
+        for item in iter {
+            out.push(item?);
+        }
+        Ok(out)
+    }
+
+    pub fn delete_batch_item_row(&self, item_id: &str) -> AppResult<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM batch_items WHERE id = ?1", params![item_id])?;
+        Ok(())
+    }
+
+    /// Creates a consistent, compacted, atomic online snapshot of the live SQLite database
+    /// (including all WAL state) at `dest_path` using SQLite's `VACUUM INTO`.
+    pub fn backup_to_file(&self, dest_path: &Path) -> AppResult<()> {
+        if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if dest_path.exists() {
+            std::fs::remove_file(dest_path)?;
+        }
+        let dest_str = dest_path.to_string_lossy().to_string();
+        let conn = self.conn.lock();
+        conn.execute("VACUUM INTO ?1", params![dest_str])?;
+        Ok(())
+    }
+
+    /// Returns `(user_project_count, batch_count, ready_asset_count)` for backup manifests.
+    pub fn count_user_entities(&self) -> AppResult<(usize, usize, usize)> {
+        let conn = self.conn.lock();
+        let projects: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM projects WHERE owner_id = ?1",
+            params![DEFAULT_OWNER_ID],
+            |r| r.get(0),
+        )?;
+        let batches: i64 =
+            conn.query_row("SELECT COUNT(*) FROM batches", [], |r| r.get(0))?;
+        let assets: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM assets WHERE status = 'ready'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((
+            projects.max(0) as usize,
+            batches.max(0) as usize,
+            assets.max(0) as usize,
+        ))
+    }
+
+    /// Atomically restores all tables from `src_db_path` into the active SQLite connection
+    /// without closing or unlocking the database file (safe on Windows, macOS, and Linux).
+    pub fn restore_from_file(&self, src_db_path: &Path) -> AppResult<(usize, usize)> {
+        if !src_db_path.is_file() {
+            return Err(AppError::not_found(format!(
+                "Backup database file not found: {}",
+                src_db_path.display()
+            )));
+        }
+
+        let src_str = src_db_path.to_string_lossy().to_string();
+        let conn = self.conn.lock();
+
+        conn.execute("PRAGMA foreign_keys = OFF", [])?;
+        if let Err(err) = conn.execute("ATTACH DATABASE ?1 AS backup_src", params![src_str]) {
+            let _ = conn.execute("PRAGMA foreign_keys = ON", []);
+            return Err(err.into());
+        }
+
+        let restore_result: AppResult<()> = (|| {
+            let has_batches: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM backup_src.sqlite_master WHERE type = 'table' AND name = 'batches'",
+                [],
+                |r| r.get(0),
+            )?;
+            let has_batch_items: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM backup_src.sqlite_master WHERE type = 'table' AND name = 'batch_items'",
+                [],
+                |r| r.get(0),
+            )?;
+
+            conn.execute_batch("BEGIN IMMEDIATE;")?;
+            let swap_res: Result<(), rusqlite::Error> = (|| {
+                conn.execute("DELETE FROM main.batch_items", [])?;
+                conn.execute("DELETE FROM main.batches", [])?;
+                conn.execute("DELETE FROM main.processing_jobs", [])?;
+                conn.execute("DELETE FROM main.subtitle_cues", [])?;
+                conn.execute("DELETE FROM main.assets", [])?;
+                conn.execute("DELETE FROM main.projects", [])?;
+
+                conn.execute(
+                    "INSERT INTO main.projects (id, owner_id, name, status, settings_json, active_subtitle_version, detected_language, created_at, updated_at)
+                     SELECT id, owner_id, name, status, settings_json, active_subtitle_version, detected_language, created_at, updated_at
+                     FROM backup_src.projects",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO main.assets (id, project_id, kind, status, storage_key, original_filename, mime_type, size_bytes, duration_ms, width, height, video_codec, audio_codec, frame_rate, pixel_format, has_audio, checksum, created_at)
+                     SELECT id, project_id, kind, status, storage_key, original_filename, mime_type, size_bytes, duration_ms, width, height, video_codec, audio_codec, frame_rate, pixel_format, has_audio, checksum, created_at
+                     FROM backup_src.assets",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO main.subtitle_cues (id, project_id, version, sequence, start_ms, end_ms, text, words_json, created_at)
+                     SELECT id, project_id, version, sequence, start_ms, end_ms, text, words_json, created_at
+                     FROM backup_src.subtitle_cues",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO main.processing_jobs (id, project_id, kind, status, stage, progress, idempotency_key, settings_snapshot_json, subtitle_version, output_asset_id, error_code, error_message_safe, internal_diagnostics, attempt_count, started_at, finished_at, created_at, updated_at)
+                     SELECT id, project_id, kind,
+                            CASE WHEN status IN ('queued', 'running') THEN 'cancelled' ELSE status END,
+                            CASE WHEN status IN ('queued', 'running') THEN 'cancelled' ELSE stage END,
+                            progress, idempotency_key, settings_snapshot_json, subtitle_version, output_asset_id, error_code, error_message_safe, internal_diagnostics, attempt_count, started_at, finished_at, created_at, updated_at
+                     FROM backup_src.processing_jobs",
+                    [],
+                )?;
+
+                if has_batches > 0 {
+                    conn.execute(
+                        "INSERT INTO main.batches (id, owner_id, name, library_project_id, shared_settings_json, mapping_mode, output_dir, created_at, updated_at)
+                         SELECT id, owner_id, name, library_project_id, shared_settings_json, mapping_mode, output_dir, created_at, updated_at
+                         FROM backup_src.batches",
+                        [],
+                    )?;
+                }
+                if has_batch_items > 0 {
+                    conn.execute(
+                        "INSERT INTO main.batch_items (id, batch_id, sort_order, selected, title, project_id, source_asset_id, logo_asset_id, outro_asset_id, use_custom_settings, created_at, updated_at)
+                         SELECT id, batch_id, sort_order, selected, title, project_id, source_asset_id, logo_asset_id, outro_asset_id, use_custom_settings, created_at, updated_at
+                         FROM backup_src.batch_items",
+                        [],
+                    )?;
+                }
+                Ok(())
+            })();
+
+            match swap_res {
+                Ok(()) => {
+                    conn.execute_batch("COMMIT;")?;
+                    Ok(())
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    Err(e.into())
+                }
+            }
+        })();
+
+        let _ = conn.execute("DETACH DATABASE backup_src", []);
+        let _ = conn.execute("PRAGMA foreign_keys = ON", []);
+
+        restore_result?;
+
+        let projects: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM projects WHERE owner_id = ?1",
+            params![DEFAULT_OWNER_ID],
+            |r| r.get(0),
+        )?;
+        let batches: i64 =
+            conn.query_row("SELECT COUNT(*) FROM batches", [], |r| r.get(0))?;
+        Ok((projects.max(0) as usize, batches.max(0) as usize))
     }
 }

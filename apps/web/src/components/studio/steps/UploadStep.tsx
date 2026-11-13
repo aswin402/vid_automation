@@ -105,7 +105,7 @@ const AssetDropCard: React.FC<DropCardProps> = ({
     try {
       await videoApi.deleteAsset(asset.id);
       onUploaded();
-    } catch (err: any) {
+    } catch {
       setError('Failed to remove asset.');
     }
   };

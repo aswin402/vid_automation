@@ -75,6 +75,7 @@ export const SubtitlesStep: React.FC<SubtitlesStepProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
+  const [isPreviewFullscreen, setIsPreviewFullscreen] = useState(false);
 
   const sourceDurationMs = sourceAsset?.duration_ms || 10000;
   const trimStartMs = settings.trim.start_ms || 0;
@@ -216,13 +217,468 @@ export const SubtitlesStep: React.FC<SubtitlesStepProps> = ({
     }));
   };
 
+  const inspectorNode = (
+    <div className="bg-card/70 border border-border rounded-2xl overflow-hidden">
+      {/* Panel Tabs */}
+      <div className="grid grid-cols-2 border-b border-border bg-muted/40">
+        <button
+          type="button"
+          onClick={() => setActiveTab('cues')}
+          className={`py-3 px-4 text-xs font-semibold flex items-center justify-center gap-2 border-b-2 transition-colors ${
+            activeTab === 'cues'
+              ? 'border-indigo-500 text-foreground bg-card'
+              : 'border-transparent text-muted-foreground hover:text-foreground'
+          }`}
+        >
+          <Subtitles className="h-4 w-4 text-indigo-400" />
+          Cue Editor ({cues.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('style')}
+          className={`py-3 px-4 text-xs font-semibold flex items-center justify-center gap-2 border-b-2 transition-colors ${
+            activeTab === 'style'
+              ? 'border-indigo-500 text-foreground bg-card'
+              : 'border-transparent text-muted-foreground hover:text-foreground'
+          }`}
+        >
+          <Palette className="h-4 w-4 text-indigo-400" />
+          ASS Style & Placement
+        </button>
+      </div>
+
+      {activeTab === 'cues' ? (
+        <div className="p-4 space-y-4">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-muted-foreground">
+              Canonical timeline: <strong className="font-mono text-foreground">00:00.000</strong> to{' '}
+              <strong className="font-mono text-foreground">
+                {formatTimecode(trimmedDurationMs)}
+              </strong>
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleAddCue}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-xs font-semibold"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Add Cue
+              </button>
+              {cuesDirty && (
+                <button
+                  type="button"
+                  disabled={saving || Boolean(localCueError)}
+                  onClick={() => handleSaveAll(false)}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold"
+                >
+                  Save Edits
+                </button>
+              )}
+            </div>
+          </div>
+
+          {cues.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-border p-8 text-center space-y-2">
+              <Subtitles className="h-7 w-7 text-muted-foreground mx-auto" />
+              <p className="text-xs font-medium text-foreground">No subtitle cues yet</p>
+              <p className="text-xs text-muted-foreground">
+                Click <strong>Generate AI Subtitles</strong> above to transcribe your trimmed clip, or click <strong>Add Cue</strong> to write captions manually.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2.5 max-h-[380px] overflow-y-auto pr-1">
+              {cues.map((cue, idx) => {
+                const isCurrent =
+                  currentTimeMs >= cue.start_ms && currentTimeMs <= cue.end_ms;
+                return (
+                  <div
+                    key={`${cue.sequence}-${idx}`}
+                    className={`rounded-xl border p-3 space-y-2 transition-colors ${
+                      isCurrent
+                        ? 'bg-indigo-600/10 border-indigo-500/60'
+                        : 'bg-background/60 border-border'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() => onTimeUpdate(cue.start_ms)}
+                          title="Seek preview to cue start"
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 text-[11px] font-mono font-semibold hover:bg-indigo-500/30"
+                        >
+                          <Play className="h-2.5 w-2.5" />#{idx + 1}
+                        </button>
+
+                        <label className="text-[11px] text-muted-foreground flex items-center gap-1">
+                          Start:
+                          <input
+                            type="text"
+                            aria-label={`Cue ${idx + 1} start time`}
+                            defaultValue={formatTimecode(cue.start_ms)}
+                            key={`start-${idx}-${cue.start_ms}`}
+                            onBlur={(e) => {
+                              const ms = parseTimecodeToMs(e.target.value);
+                              if (ms !== null) handleCueChange(idx, { start_ms: ms });
+                            }}
+                            className="w-24 rounded bg-card border border-border px-1.5 py-0.5 font-mono text-xs text-foreground"
+                          />
+                        </label>
+
+                        <label className="text-[11px] text-muted-foreground flex items-center gap-1">
+                          End:
+                          <input
+                            type="text"
+                            aria-label={`Cue ${idx + 1} end time`}
+                            defaultValue={formatTimecode(cue.end_ms)}
+                            key={`end-${idx}-${cue.end_ms}`}
+                            onBlur={(e) => {
+                              const ms = parseTimecodeToMs(e.target.value);
+                              if (ms !== null) handleCueChange(idx, { end_ms: ms });
+                            }}
+                            className="w-24 rounded bg-card border border-border px-1.5 py-0.5 font-mono text-xs text-foreground"
+                          />
+                        </label>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteCue(idx)}
+                        aria-label={`Delete cue ${idx + 1}`}
+                        className="text-muted-foreground hover:text-rose-400 p-1 rounded transition-colors"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+
+                    <textarea
+                      rows={2}
+                      aria-label={`Cue ${idx + 1} text`}
+                      value={cue.text}
+                      onChange={(e) => handleCueChange(idx, { text: e.target.value })}
+                      className="w-full rounded-lg bg-card border border-border px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      ) : (
+        /* ASS Style & Position Tab */
+        <div className="p-4 space-y-4 max-h-[430px] overflow-y-auto">
+          <div className="flex items-center justify-between">
+            <PositionGridPicker
+              label="9-Position Preset (or drag subtitle in preview)"
+              value={styleCfg.position}
+              customCoordinatesActive={
+                styleCfg.x_ratio !== null && styleCfg.y_ratio !== null
+              }
+              onChange={(pos: AnchorPosition) =>
+                onUpdateSettings((prev) => ({
+                  ...prev,
+                  subtitles: {
+                    ...prev.subtitles,
+                    style: {
+                      ...prev.subtitles.style,
+                      position: pos,
+                      x_ratio: null,
+                      y_ratio: null,
+                    },
+                  },
+                }))
+              }
+            />
+
+            <button
+              type="button"
+              onClick={resetStyleDefaults}
+              className="inline-flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300 font-medium self-start"
+            >
+              <RotateCcw className="h-3 w-3" />
+              Reset Style
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-border">
+            <div>
+              <label
+                htmlFor="sub-font-family"
+                className="block text-xs font-medium text-muted-foreground mb-1"
+              >
+                Font Family (Server Allowlist)
+              </label>
+              <select
+                id="sub-font-family"
+                value={styleCfg.font_family}
+                onChange={(e) =>
+                  onUpdateSettings((prev) => ({
+                    ...prev,
+                    subtitles: {
+                      ...prev.subtitles,
+                      style: { ...prev.subtitles.style, font_family: e.target.value },
+                    },
+                  }))
+                }
+                className="w-full rounded-lg bg-background border border-border px-2.5 py-1.5 text-xs"
+              >
+                {allowedFonts.map((f) => (
+                  <option key={f} value={f}>
+                    {f}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <div className="flex justify-between text-xs mb-1">
+                <span className="text-muted-foreground font-medium">Font Size (1080p ref)</span>
+                <span className="font-mono text-indigo-400">{styleCfg.font_size}px</span>
+              </div>
+              <input
+                type="range"
+                min={20}
+                max={84}
+                step={2}
+                value={styleCfg.font_size}
+                onChange={(e) =>
+                  onUpdateSettings((prev) => ({
+                    ...prev,
+                    subtitles: {
+                      ...prev.subtitles,
+                      style: {
+                        ...prev.subtitles.style,
+                        font_size: Number(e.target.value),
+                      },
+                    },
+                  }))
+                }
+                className="w-full accent-indigo-500 mt-1.5"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-2 border-t border-border">
+            <label className="block text-xs font-medium text-muted-foreground">
+              Text Color
+              <div className="flex items-center gap-2 mt-1">
+                <input
+                  type="color"
+                  value={styleCfg.text_color}
+                  onChange={(e) =>
+                    onUpdateSettings((prev) => ({
+                      ...prev,
+                      subtitles: {
+                        ...prev.subtitles,
+                        style: { ...prev.subtitles.style, text_color: e.target.value },
+                      },
+                    }))
+                  }
+                  className="h-7 w-10 rounded cursor-pointer border border-border bg-transparent"
+                />
+                <span className="font-mono text-[11px]">{styleCfg.text_color}</span>
+              </div>
+            </label>
+
+            <label className="block text-xs font-medium text-muted-foreground">
+              Outline Color
+              <div className="flex items-center gap-2 mt-1">
+                <input
+                  type="color"
+                  value={styleCfg.outline_color}
+                  onChange={(e) =>
+                    onUpdateSettings((prev) => ({
+                      ...prev,
+                      subtitles: {
+                        ...prev.subtitles,
+                        style: {
+                          ...prev.subtitles.style,
+                          outline_color: e.target.value,
+                        },
+                      },
+                    }))
+                  }
+                  className="h-7 w-10 rounded cursor-pointer border border-border bg-transparent"
+                />
+                <span className="font-mono text-[11px]">{styleCfg.outline_color}</span>
+              </div>
+            </label>
+
+            <label className="block text-xs font-medium text-muted-foreground">
+              Text Alignment
+              <select
+                value={styleCfg.alignment}
+                onChange={(e) =>
+                  onUpdateSettings((prev) => ({
+                    ...prev,
+                    subtitles: {
+                      ...prev.subtitles,
+                      style: {
+                        ...prev.subtitles.style,
+                        alignment: e.target.value as 'left' | 'center' | 'right',
+                      },
+                    },
+                  }))
+                }
+                className="w-full rounded-lg bg-background border border-border px-2 py-1.5 text-xs mt-1"
+              >
+                <option value="left">Left</option>
+                <option value="center">Center</option>
+                <option value="right">Right</option>
+              </select>
+            </label>
+          </div>
+
+          {/* Background Box, Outline & Shadow Toggles */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-border">
+            <div className="rounded-xl bg-background/50 border border-border p-3 space-y-2">
+              <label className="inline-flex items-center gap-2 cursor-pointer text-xs font-semibold">
+                <input
+                  type="checkbox"
+                  checked={styleCfg.background_enabled}
+                  onChange={(e) =>
+                    onUpdateSettings((prev) => ({
+                      ...prev,
+                      subtitles: {
+                        ...prev.subtitles,
+                        style: {
+                          ...prev.subtitles.style,
+                          background_enabled: e.target.checked,
+                        },
+                      },
+                    }))
+                  }
+                  className="rounded accent-indigo-600"
+                />
+                Background Box (ASS BorderStyle 3)
+              </label>
+              {styleCfg.background_enabled && (
+                <div className="flex items-center gap-3 pt-1">
+                  <input
+                    type="color"
+                    value={styleCfg.background_color}
+                    onChange={(e) =>
+                      onUpdateSettings((prev) => ({
+                        ...prev,
+                        subtitles: {
+                          ...prev.subtitles,
+                          style: {
+                            ...prev.subtitles.style,
+                            background_color: e.target.value,
+                          },
+                        },
+                      }))
+                    }
+                    className="h-6 w-8 rounded border border-border"
+                  />
+                  <input
+                    type="range"
+                    min={0.1}
+                    max={1.0}
+                    step={0.05}
+                    value={styleCfg.background_opacity}
+                    onChange={(e) =>
+                      onUpdateSettings((prev) => ({
+                        ...prev,
+                        subtitles: {
+                          ...prev.subtitles,
+                          style: {
+                            ...prev.subtitles.style,
+                            background_opacity: Number(e.target.value),
+                          },
+                        },
+                      }))
+                    }
+                    className="flex-1 accent-indigo-500"
+                  />
+                  <span className="text-[11px] font-mono">
+                    {Math.round(styleCfg.background_opacity * 100)}%
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-xl bg-background/50 border border-border p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="inline-flex items-center gap-2 cursor-pointer text-xs font-semibold">
+                  <input
+                    type="checkbox"
+                    checked={styleCfg.outline_enabled}
+                    onChange={(e) =>
+                      onUpdateSettings((prev) => ({
+                        ...prev,
+                        subtitles: {
+                          ...prev.subtitles,
+                          style: {
+                            ...prev.subtitles.style,
+                            outline_enabled: e.target.checked,
+                          },
+                        },
+                      }))
+                    }
+                    className="rounded accent-indigo-600"
+                  />
+                  Outline ({styleCfg.outline_thickness}px)
+                </label>
+
+                <label className="inline-flex items-center gap-1.5 cursor-pointer text-xs">
+                  <input
+                    type="checkbox"
+                    checked={styleCfg.shadow_enabled}
+                    onChange={(e) =>
+                      onUpdateSettings((prev) => ({
+                        ...prev,
+                        subtitles: {
+                          ...prev.subtitles,
+                          style: {
+                            ...prev.subtitles.style,
+                            shadow_enabled: e.target.checked,
+                          },
+                        },
+                      }))
+                    }
+                    className="rounded accent-indigo-600"
+                  />
+                  Shadow
+                </label>
+              </div>
+
+              <input
+                type="range"
+                min={1}
+                max={8}
+                step={1}
+                disabled={!styleCfg.outline_enabled}
+                value={styleCfg.outline_thickness}
+                onChange={(e) =>
+                  onUpdateSettings((prev) => ({
+                    ...prev,
+                    subtitles: {
+                      ...prev.subtitles,
+                      style: {
+                        ...prev.subtitles.style,
+                        outline_thickness: Number(e.target.value),
+                      },
+                    },
+                  }))
+                }
+                className="w-full accent-indigo-500"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border pb-4">
         <div>
           <h2 className="text-lg font-bold">
-            Step 6: AI Subtitles, Review & Styling (Optional)
+            Step 7: AI Subtitles, Review & Styling (Optional)
           </h2>
           <p className="text-xs text-muted-foreground">
             AI-generated subtitles can contain mistakes. You can review, edit timestamps, and customize ASS styling before export.
@@ -389,6 +845,8 @@ export const SubtitlesStep: React.FC<SubtitlesStepProps> = ({
             currentTimeMs={currentTimeMs}
             onTimeUpdate={onTimeUpdate}
             dragMode="subtitles"
+            fullscreenInspector={inspectorNode}
+            onFullscreenChange={setIsPreviewFullscreen}
             onDragLogo={(xr, yr) =>
               onUpdateSettings((prev) => ({
                 ...prev,
@@ -412,459 +870,7 @@ export const SubtitlesStep: React.FC<SubtitlesStepProps> = ({
           />
         </div>
 
-        <div className="lg:col-span-6 bg-card/70 border border-border rounded-2xl overflow-hidden">
-          {/* Panel Tabs */}
-          <div className="grid grid-cols-2 border-b border-border bg-muted/40">
-            <button
-              type="button"
-              onClick={() => setActiveTab('cues')}
-              className={`py-3 px-4 text-xs font-semibold flex items-center justify-center gap-2 border-b-2 transition-colors ${
-                activeTab === 'cues'
-                  ? 'border-indigo-500 text-foreground bg-card'
-                  : 'border-transparent text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              <Subtitles className="h-4 w-4 text-indigo-400" />
-              Cue Editor ({cues.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('style')}
-              className={`py-3 px-4 text-xs font-semibold flex items-center justify-center gap-2 border-b-2 transition-colors ${
-                activeTab === 'style'
-                  ? 'border-indigo-500 text-foreground bg-card'
-                  : 'border-transparent text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              <Palette className="h-4 w-4 text-indigo-400" />
-              ASS Style & Placement
-            </button>
-          </div>
-
-          {activeTab === 'cues' ? (
-            <div className="p-4 space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-muted-foreground">
-                  Canonical timeline: <strong className="font-mono text-foreground">00:00.000</strong> to{' '}
-                  <strong className="font-mono text-foreground">
-                    {formatTimecode(trimmedDurationMs)}
-                  </strong>
-                </span>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleAddCue}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-xs font-semibold"
-                  >
-                    <Plus className="h-3.5 w-3.5" />
-                    Add Cue
-                  </button>
-                  {cuesDirty && (
-                    <button
-                      type="button"
-                      disabled={saving || Boolean(localCueError)}
-                      onClick={() => handleSaveAll(false)}
-                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold"
-                    >
-                      Save Edits
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {cues.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-border p-8 text-center space-y-2">
-                  <Subtitles className="h-7 w-7 text-muted-foreground mx-auto" />
-                  <p className="text-xs font-medium text-foreground">No subtitle cues yet</p>
-                  <p className="text-xs text-muted-foreground">
-                    Click <strong>Generate AI Subtitles</strong> above to transcribe your trimmed clip, or click <strong>Add Cue</strong> to write captions manually.
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-2.5 max-h-[380px] overflow-y-auto pr-1">
-                  {cues.map((cue, idx) => {
-                    const isCurrent =
-                      currentTimeMs >= cue.start_ms && currentTimeMs <= cue.end_ms;
-                    return (
-                      <div
-                        key={`${cue.sequence}-${idx}`}
-                        className={`rounded-xl border p-3 space-y-2 transition-colors ${
-                          isCurrent
-                            ? 'bg-indigo-600/10 border-indigo-500/60'
-                            : 'bg-background/60 border-border'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => onTimeUpdate(cue.start_ms)}
-                              title="Seek preview to cue start"
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 text-[11px] font-mono font-semibold hover:bg-indigo-500/30"
-                            >
-                              <Play className="h-2.5 w-2.5" />#{idx + 1}
-                            </button>
-
-                            <label className="text-[11px] text-muted-foreground flex items-center gap-1">
-                              Start:
-                              <input
-                                type="text"
-                                aria-label={`Cue ${idx + 1} start time`}
-                                defaultValue={formatTimecode(cue.start_ms)}
-                                key={`start-${idx}-${cue.start_ms}`}
-                                onBlur={(e) => {
-                                  const ms = parseTimecodeToMs(e.target.value);
-                                  if (ms !== null) handleCueChange(idx, { start_ms: ms });
-                                }}
-                                className="w-24 rounded bg-card border border-border px-1.5 py-0.5 font-mono text-xs text-foreground"
-                              />
-                            </label>
-
-                            <label className="text-[11px] text-muted-foreground flex items-center gap-1">
-                              End:
-                              <input
-                                type="text"
-                                aria-label={`Cue ${idx + 1} end time`}
-                                defaultValue={formatTimecode(cue.end_ms)}
-                                key={`end-${idx}-${cue.end_ms}`}
-                                onBlur={(e) => {
-                                  const ms = parseTimecodeToMs(e.target.value);
-                                  if (ms !== null) handleCueChange(idx, { end_ms: ms });
-                                }}
-                                className="w-24 rounded bg-card border border-border px-1.5 py-0.5 font-mono text-xs text-foreground"
-                              />
-                            </label>
-                          </div>
-
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteCue(idx)}
-                            aria-label={`Delete cue ${idx + 1}`}
-                            className="text-muted-foreground hover:text-rose-400 p-1 rounded transition-colors"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-
-                        <textarea
-                          rows={2}
-                          aria-label={`Cue ${idx + 1} text`}
-                          value={cue.text}
-                          onChange={(e) => handleCueChange(idx, { text: e.target.value })}
-                          className="w-full rounded-lg bg-card border border-border px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
-                        />
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          ) : (
-            /* ASS Style & Position Tab */
-            <div className="p-4 space-y-4 max-h-[430px] overflow-y-auto">
-              <div className="flex items-center justify-between">
-                <PositionGridPicker
-                  label="9-Position Preset (or drag subtitle in preview)"
-                  value={styleCfg.position}
-                  customCoordinatesActive={
-                    styleCfg.x_ratio !== null && styleCfg.y_ratio !== null
-                  }
-                  onChange={(pos: AnchorPosition) =>
-                    onUpdateSettings((prev) => ({
-                      ...prev,
-                      subtitles: {
-                        ...prev.subtitles,
-                        style: {
-                          ...prev.subtitles.style,
-                          position: pos,
-                          x_ratio: null,
-                          y_ratio: null,
-                        },
-                      },
-                    }))
-                  }
-                />
-
-                <button
-                  type="button"
-                  onClick={resetStyleDefaults}
-                  className="inline-flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300 font-medium self-start"
-                >
-                  <RotateCcw className="h-3 w-3" />
-                  Reset Style
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-border">
-                <div>
-                  <label
-                    htmlFor="sub-font-family"
-                    className="block text-xs font-medium text-muted-foreground mb-1"
-                  >
-                    Font Family (Server Allowlist)
-                  </label>
-                  <select
-                    id="sub-font-family"
-                    value={styleCfg.font_family}
-                    onChange={(e) =>
-                      onUpdateSettings((prev) => ({
-                        ...prev,
-                        subtitles: {
-                          ...prev.subtitles,
-                          style: { ...prev.subtitles.style, font_family: e.target.value },
-                        },
-                      }))
-                    }
-                    className="w-full rounded-lg bg-background border border-border px-2.5 py-1.5 text-xs"
-                  >
-                    {allowedFonts.map((f) => (
-                      <option key={f} value={f}>
-                        {f}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <div className="flex justify-between text-xs mb-1">
-                    <span className="text-muted-foreground font-medium">Font Size (1080p ref)</span>
-                    <span className="font-mono text-indigo-400">{styleCfg.font_size}px</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={20}
-                    max={84}
-                    step={2}
-                    value={styleCfg.font_size}
-                    onChange={(e) =>
-                      onUpdateSettings((prev) => ({
-                        ...prev,
-                        subtitles: {
-                          ...prev.subtitles,
-                          style: {
-                            ...prev.subtitles.style,
-                            font_size: Number(e.target.value),
-                          },
-                        },
-                      }))
-                    }
-                    className="w-full accent-indigo-500 mt-1.5"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-2 border-t border-border">
-                <label className="block text-xs font-medium text-muted-foreground">
-                  Text Color
-                  <div className="flex items-center gap-2 mt-1">
-                    <input
-                      type="color"
-                      value={styleCfg.text_color}
-                      onChange={(e) =>
-                        onUpdateSettings((prev) => ({
-                          ...prev,
-                          subtitles: {
-                            ...prev.subtitles,
-                            style: { ...prev.subtitles.style, text_color: e.target.value },
-                          },
-                        }))
-                      }
-                      className="h-7 w-10 rounded cursor-pointer border border-border bg-transparent"
-                    />
-                    <span className="font-mono text-[11px]">{styleCfg.text_color}</span>
-                  </div>
-                </label>
-
-                <label className="block text-xs font-medium text-muted-foreground">
-                  Outline Color
-                  <div className="flex items-center gap-2 mt-1">
-                    <input
-                      type="color"
-                      value={styleCfg.outline_color}
-                      onChange={(e) =>
-                        onUpdateSettings((prev) => ({
-                          ...prev,
-                          subtitles: {
-                            ...prev.subtitles,
-                            style: {
-                              ...prev.subtitles.style,
-                              outline_color: e.target.value,
-                            },
-                          },
-                        }))
-                      }
-                      className="h-7 w-10 rounded cursor-pointer border border-border bg-transparent"
-                    />
-                    <span className="font-mono text-[11px]">{styleCfg.outline_color}</span>
-                  </div>
-                </label>
-
-                <label className="block text-xs font-medium text-muted-foreground">
-                  Text Alignment
-                  <select
-                    value={styleCfg.alignment}
-                    onChange={(e) =>
-                      onUpdateSettings((prev) => ({
-                        ...prev,
-                        subtitles: {
-                          ...prev.subtitles,
-                          style: {
-                            ...prev.subtitles.style,
-                            alignment: e.target.value as 'left' | 'center' | 'right',
-                          },
-                        },
-                      }))
-                    }
-                    className="w-full rounded-lg bg-background border border-border px-2 py-1.5 text-xs mt-1"
-                  >
-                    <option value="left">Left</option>
-                    <option value="center">Center</option>
-                    <option value="right">Right</option>
-                  </select>
-                </label>
-              </div>
-
-              {/* Background Box, Outline & Shadow Toggles */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-border">
-                <div className="rounded-xl bg-background/50 border border-border p-3 space-y-2">
-                  <label className="inline-flex items-center gap-2 cursor-pointer text-xs font-semibold">
-                    <input
-                      type="checkbox"
-                      checked={styleCfg.background_enabled}
-                      onChange={(e) =>
-                        onUpdateSettings((prev) => ({
-                          ...prev,
-                          subtitles: {
-                            ...prev.subtitles,
-                            style: {
-                              ...prev.subtitles.style,
-                              background_enabled: e.target.checked,
-                            },
-                          },
-                        }))
-                      }
-                      className="rounded accent-indigo-600"
-                    />
-                    Background Box (ASS BorderStyle 3)
-                  </label>
-                  {styleCfg.background_enabled && (
-                    <div className="flex items-center gap-3 pt-1">
-                      <input
-                        type="color"
-                        value={styleCfg.background_color}
-                        onChange={(e) =>
-                          onUpdateSettings((prev) => ({
-                            ...prev,
-                            subtitles: {
-                              ...prev.subtitles,
-                              style: {
-                                ...prev.subtitles.style,
-                                background_color: e.target.value,
-                              },
-                            },
-                          }))
-                        }
-                        className="h-6 w-8 rounded border border-border"
-                      />
-                      <input
-                        type="range"
-                        min={0.1}
-                        max={1.0}
-                        step={0.05}
-                        value={styleCfg.background_opacity}
-                        onChange={(e) =>
-                          onUpdateSettings((prev) => ({
-                            ...prev,
-                            subtitles: {
-                              ...prev.subtitles,
-                              style: {
-                                ...prev.subtitles.style,
-                                background_opacity: Number(e.target.value),
-                              },
-                            },
-                          }))
-                        }
-                        className="flex-1 accent-indigo-500"
-                      />
-                      <span className="text-[11px] font-mono">
-                        {Math.round(styleCfg.background_opacity * 100)}%
-                      </span>
-                    </div>
-                  )}
-                </div>
-
-                <div className="rounded-xl bg-background/50 border border-border p-3 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <label className="inline-flex items-center gap-2 cursor-pointer text-xs font-semibold">
-                      <input
-                        type="checkbox"
-                        checked={styleCfg.outline_enabled}
-                        onChange={(e) =>
-                          onUpdateSettings((prev) => ({
-                            ...prev,
-                            subtitles: {
-                              ...prev.subtitles,
-                              style: {
-                                ...prev.subtitles.style,
-                                outline_enabled: e.target.checked,
-                              },
-                            },
-                          }))
-                        }
-                        className="rounded accent-indigo-600"
-                      />
-                      Outline ({styleCfg.outline_thickness}px)
-                    </label>
-
-                    <label className="inline-flex items-center gap-1.5 cursor-pointer text-xs">
-                      <input
-                        type="checkbox"
-                        checked={styleCfg.shadow_enabled}
-                        onChange={(e) =>
-                          onUpdateSettings((prev) => ({
-                            ...prev,
-                            subtitles: {
-                              ...prev.subtitles,
-                              style: {
-                                ...prev.subtitles.style,
-                                sibling: undefined,
-                                shadow_enabled: e.target.checked,
-                              },
-                            },
-                          }))
-                        }
-                        className="rounded accent-indigo-600"
-                      />
-                      Shadow
-                    </label>
-                  </div>
-
-                  <input
-                    type="range"
-                    min={1}
-                    max={8}
-                    step={1}
-                    disabled={!styleCfg.outline_enabled}
-                    value={styleCfg.outline_thickness}
-                    onChange={(e) =>
-                      onUpdateSettings((prev) => ({
-                        ...prev,
-                        subtitles: {
-                          ...prev.subtitles,
-                          style: {
-                            ...prev.subtitles.style,
-                            outline_thickness: Number(e.target.value),
-                          },
-                        },
-                      }))
-                    }
-                    className="w-full accent-indigo-500"
-                  />
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
+        <div className="lg:col-span-6">{!isPreviewFullscreen && inspectorNode}</div>
       </div>
     </div>
   );

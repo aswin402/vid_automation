@@ -1,6 +1,6 @@
 [package]
 name = "celestiavid-desktop"
-version = "0.2.1"
+version = "0.2.2"
 description = "CelestiaVid Native Desktop App (Tauri v2 + Pure Rust Media Pipeline)"
 authors = ["CelestiaLabs"]
 license = "MIT"

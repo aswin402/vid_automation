@@ -1,12 +1,23 @@
 import React, { useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Loader2, Save, CheckCircle2 } from 'lucide-react';
+import {
+  ArrowLeft,
+  Loader2,
+  Save,
+  CheckCircle2,
+  Layers,
+  Upload,
+  Sparkles,
+} from 'lucide-react';
 import { videoApi } from '@/api/videoApi';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { HintTooltip } from '@/components/ui/tooltip';
 import { useWorkflowStore } from '@/store/useWorkflowStore';
-import { WorkflowStepper } from '@/components/studio/WorkflowStepper';
 import { UploadStep } from '@/components/studio/steps/UploadStep';
 import { TrimStep } from '@/components/studio/steps/TrimStep';
+import { CropFrameStep } from '@/components/studio/steps/CropFrameStep';
 import { ColorCorrectionStep } from '@/components/studio/steps/ColorCorrectionStep';
 import { AudioEnhancementStep } from '@/components/studio/steps/AudioEnhancementStep';
 import { LogoStep } from '@/components/studio/steps/LogoStep';
@@ -16,6 +27,8 @@ import { ReviewExportStep } from '@/components/studio/steps/ReviewExportStep';
 
 export const ProjectStudioPage: React.FC = () => {
   const { projectId } = useParams<{ projectId: string }>();
+  const [searchParams] = useSearchParams();
+  const parentBatchId = searchParams.get('batchId');
   const queryClient = useQueryClient();
 
   const {
@@ -84,15 +97,15 @@ export const ProjectStudioPage: React.FC = () => {
     if (subtitleData?.cues && !cuesDirty) {
       setDraftCues(subtitleData.cues, false);
     }
-  }, [subtitleData?.version, subtitleData?.cues]);
+  }, [subtitleData?.version, subtitleData?.cues, cuesDirty, setDraftCues]);
 
   // Refetch subtitles when a transcription job finishes
   const latestTranscribeJob = project?.jobs?.find((j) => j.kind === 'transcribe');
   useEffect(() => {
     if (latestTranscribeJob?.status === 'completed') {
-      refetchSubtitles();
+      void refetchSubtitles();
     }
-  }, [latestTranscribeJob?.status, latestTranscribeJob?.subtitle_version]);
+  }, [latestTranscribeJob?.status, latestTranscribeJob?.subtitle_version, refetchSubtitles]);
 
   // Auto-save draftSettings after 450ms of inactivity using revision guard so newer edits are never clobbered
   useEffect(() => {
@@ -186,69 +199,108 @@ export const ProjectStudioPage: React.FC = () => {
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
-      {/* Studio Top Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <Link
-            to="/"
-            className="p-2 rounded-xl border border-border hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-            aria-label="Back to Dashboard"
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-5 space-y-5">
+      {/* Minimal Studio Top Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-border">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <HintTooltip
+            label={parentBatchId ? 'Back to Batch Studio' : 'Back to Workspace'}
+            side="bottom"
           >
-            <ArrowLeft className="h-4 w-4" />
-          </Link>
-          <div>
-            <h1 className="text-lg font-bold leading-tight">{project.name}</h1>
-            <span className="text-xs text-muted-foreground">
+            <Button asChild variant="ghost" size="icon-sm">
+              <Link
+                to={parentBatchId ? `/batches/${parentBatchId}` : '/'}
+                aria-label={parentBatchId ? 'Back to Batch Studio' : 'Back to Workspace'}
+              >
+                <ArrowLeft className="h-4 w-4" />
+              </Link>
+            </Button>
+          </HintTooltip>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <h1 className="text-base font-semibold leading-tight truncate">
+                {project.name}
+              </h1>
+              {parentBatchId && (
+                <Badge variant="secondary">
+                  <Link
+                    to={`/batches/${parentBatchId}`}
+                    className="inline-flex items-center gap-1"
+                  >
+                    <Layers className="h-3 w-3" />
+                    Batch
+                  </Link>
+                </Badge>
+              )}
+            </div>
+            <span className="text-[11px] text-muted-foreground font-mono">
               {sourceAsset
                 ? `${sourceAsset.original_filename} · ${sourceAsset.width}×${sourceAsset.height}`
-                : 'Step 1: Upload a source video to begin'}
+                : 'Upload source video'}
             </span>
           </div>
         </div>
 
-        <div className="flex items-center gap-2.5">
-          {settingsDirty || cuesDirty ? (
-            <button
+        <div className="flex flex-wrap items-center gap-2">
+          <HintTooltip
+            label="Media Assets"
+            detail="Upload or replace source video, logo & outro"
+            side="bottom"
+          >
+            <Button
               type="button"
-              onClick={async () => {
-                if (cuesDirty) await handleSaveCues();
-                if (settingsDirty) await handleSaveSettings();
-              }}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-semibold"
+              variant={activeStep === 'upload' ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => setActiveStep('upload')}
             >
-              <Save className="h-3.5 w-3.5" />
-              Save Unsaved Changes
-            </button>
+              <Upload className="h-3.5 w-3.5" />
+              Media
+            </Button>
+          </HintTooltip>
+
+          <HintTooltip
+            label="Output & Export"
+            detail="Set encoding quality and render MP4"
+            side="bottom"
+          >
+            <Button
+              type="button"
+              variant={activeStep === 'export' ? 'default' : 'secondary'}
+              size="sm"
+              disabled={!sourceAsset}
+              onClick={() => setActiveStep('export')}
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              Export
+            </Button>
+          </HintTooltip>
+
+          {settingsDirty || cuesDirty ? (
+            <HintTooltip label="Save pending edits now" side="bottom">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={async () => {
+                  if (cuesDirty) await handleSaveCues();
+                  if (settingsDirty) await handleSaveSettings();
+                }}
+              >
+                <Save className="h-3.5 w-3.5 text-primary" />
+                Save
+              </Button>
+            </HintTooltip>
           ) : (
-            <span className="inline-flex items-center gap-1.5 text-xs text-emerald-400 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20">
-              <CheckCircle2 className="h-3.5 w-3.5" />
-              All changes saved
-            </span>
+            <Badge variant="outline" className="gap-1">
+              <CheckCircle2 className="h-3 w-3 text-emerald-500" />
+              Saved
+            </Badge>
           )}
         </div>
       </div>
 
-      {/* 8-Step Guided Stepper */}
-      <WorkflowStepper
-        activeStep={activeStep}
-        hasSourceVideo={Boolean(sourceAsset)}
-        hasColorCorrection={Boolean(draftSettings.color_correction?.enabled)}
-        hasAudioEnhancement={Boolean(draftSettings.audio_enhancement?.enabled)}
-        hasLogo={Boolean(logoAsset && draftSettings.logo.enabled)}
-        hasSubtitles={Boolean(
-          draftSettings.subtitles.enabled && draftCues.length > 0
-        )}
-        hasOutro={Boolean(outroAsset && draftSettings.outro.enabled)}
-        onSelectStep={async (step) => {
-          setActiveStep(step);
-          if (cuesDirty) await handleSaveCues();
-          if (settingsDirty) await handleSaveSettings();
-        }}
-      />
-
       {/* Step Content */}
-      <div className="rounded-3xl bg-card/50 border border-border p-5 sm:p-6 shadow-sm">
+      <div className="rounded-2xl bg-card border border-border p-4 sm:p-6 shadow-2xs">
         {activeStep === 'upload' && (
           <UploadStep
             projectId={project.id}
@@ -269,6 +321,22 @@ export const ProjectStudioPage: React.FC = () => {
             onUpdateSettings={updateDraftSettings}
             onSaveSettings={handleSaveSettings}
             onBack={() => setActiveStep('upload')}
+            onNext={() => setActiveStep('crop')}
+          />
+        )}
+
+        {activeStep === 'crop' && (
+          <CropFrameStep
+            projectId={project.id}
+            sourceAsset={sourceAsset}
+            logoAsset={logoAsset}
+            settings={draftSettings}
+            cues={draftCues}
+            currentTimeMs={currentTimeMs}
+            onTimeUpdate={setCurrentTimeMs}
+            onUpdateSettings={updateDraftSettings}
+            onSaveSettings={handleSaveSettings}
+            onBack={() => setActiveStep('trim')}
             onNext={() => setActiveStep('color')}
           />
         )}
@@ -283,7 +351,7 @@ export const ProjectStudioPage: React.FC = () => {
             onTimeUpdate={setCurrentTimeMs}
             onUpdateSettings={updateDraftSettings}
             onSaveSettings={handleSaveSettings}
-            onBack={() => setActiveStep('trim')}
+            onBack={() => setActiveStep('crop')}
             onNext={() => setActiveStep('audio')}
           />
         )}
@@ -385,6 +453,7 @@ export const ProjectStudioPage: React.FC = () => {
             subtitleVersion={activeSubVersion}
             detectedLanguage={project.detected_language}
             latestExportJob={latestExportJob}
+            onUpdateSettings={updateDraftSettings}
             onFlushBeforeExport={handleFlushBeforeExport}
             onJobUpdated={() => refetchProject()}
             onBack={() => setActiveStep('outro')}

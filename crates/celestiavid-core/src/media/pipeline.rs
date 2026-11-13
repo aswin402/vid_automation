@@ -1,11 +1,12 @@
 use crate::error::{AppError, AppResult};
+use crate::media::crop::{build_crop_and_scale_video_filter, resolve_target_output_dimensions};
 use crate::media::ffmpeg_bin::{
     configure_tokio_background_cmd, normalize_platform_path, resolve_ffmpeg_paths,
 };
 use crate::media::geometry::{affine_overlay_expressions, resolve_anchor_vector};
 use crate::media::probe::{probe_video_file, MediaMetadata};
 use crate::models::{
-    AudioEnhancementSettings, ColorCorrectionSettings, LogoSettings, OutputSettings,
+    AudioEnhancementSettings, ColorCorrectionSettings, CropSettings, LogoSettings, OutputSettings,
 };
 use std::path::Path;
 use std::time::Duration;
@@ -111,6 +112,7 @@ pub async fn trim_video_segment(
     start_ms: i64,
     end_ms: i64,
     source_meta: &MediaMetadata,
+    crop_cfg: Option<&CropSettings>,
     output_cfg: Option<&OutputSettings>,
 ) -> AppResult<MediaMetadata> {
     let (s_ms, e_ms) = validate_trim_range(
@@ -121,17 +123,36 @@ pub async fn trim_video_segment(
     let duration_sec = (e_ms - s_ms) as f64 / 1000.0;
     let start_sec = s_ms as f64 / 1000.0;
 
-    let raw_w = output_cfg.and_then(|c| c.width).unwrap_or(source_meta.width);
-    let raw_h = output_cfg.and_then(|c| c.height).unwrap_or(source_meta.height);
-    let out_w = ((raw_w / 2) * 2).max(2);
-    let out_h = ((raw_h / 2) * 2).max(2);
+    let (out_w, out_h) = resolve_target_output_dimensions(
+        crop_cfg,
+        source_meta.width,
+        source_meta.height,
+        output_cfg.and_then(|c| c.width),
+        output_cfg.and_then(|c| c.height),
+    );
     let out_fps = output_cfg
         .and_then(|c| c.fps)
         .unwrap_or_else(|| if source_meta.fps_float > 0.0 { source_meta.fps_float } else { 30.0 });
 
     let (v_codec, preset, crf, a_codec) = resolve_encoding_profile(output_cfg);
-    let scale_f = normalization_scale_filter("pad", out_w, out_h);
+    let scale_f = build_crop_and_scale_video_filter(
+        crop_cfg,
+        source_meta.width,
+        source_meta.height,
+        out_w,
+        out_h,
+    );
     let vf_chain = format!("{scale_f},setsar=1,fps={out_fps:.3},format=yuv420p");
+
+    info!(
+        src_w = source_meta.width,
+        src_h = source_meta.height,
+        out_w = out_w,
+        out_h = out_h,
+        crop_enabled = crop_cfg.map_or(false, |c| c.enabled),
+        vf_chain = %vf_chain,
+        "trim_and_crop_video_segment"
+    );
 
     let mut args: Vec<String> = vec![
         "-ss".into(),

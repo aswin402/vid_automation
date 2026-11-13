@@ -8,6 +8,7 @@ import {
   Loader2,
   ArrowLeft,
   Scissors,
+  Crop,
   Palette,
   Volume2,
   Image as ImageIcon,
@@ -15,27 +16,55 @@ import {
   Film,
   ShieldCheck,
   AlertTriangle,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { extractApiError, videoApi } from '@/api/videoApi';
+import { Button } from '@/components/ui/button';
+import { NumberInput } from '@/components/ui/number-input';
+import { Slider } from '@/components/ui/slider';
+import { HintTooltip } from '@/components/ui/tooltip';
+import { resolveTargetOutputDimensions } from '@/lib/cropMath';
 import { formatBytes, formatFriendlyDuration, formatTimecode } from '@/lib/timecode';
 import type {
   Asset,
   EditSettings,
+  OutputSettings,
   ProcessingJob,
   SubtitleCue,
 } from '@/types/video';
 
 const PIPELINE_STAGES = [
   { key: 'queued', label: 'Queued' },
-  { key: 'validating', label: 'Validating Settings' },
-  { key: 'probing', label: 'Probing Media (FFprobe)' },
-  { key: 'trimming', label: 'Frame-Accurate Trim' },
-  { key: 'rendering_main', label: 'Logo & ASS Subtitle Burn-in' },
-  { key: 'normalizing_outro', label: 'Normalizing Outro' },
-  { key: 'joining_outro', label: 'Concatenating Segments' },
-  { key: 'validating_output', label: 'Output FFprobe Verification' },
-  { key: 'uploading_output', label: 'Publishing Output' },
-  { key: 'completed', label: 'Completed' },
+  { key: 'validating', label: 'Validate' },
+  { key: 'probing', label: 'Probe' },
+  { key: 'trimming', label: 'Trim' },
+  { key: 'rendering_main', label: 'Render' },
+  { key: 'normalizing_outro', label: 'Outro Prep' },
+  { key: 'joining_outro', label: 'Concat' },
+  { key: 'validating_output', label: 'Verify' },
+  { key: 'uploading_output', label: 'Publish' },
+  { key: 'completed', label: 'Done' },
+];
+
+const RESOLUTION_PRESETS = [
+  { label: 'Auto', width: null, height: null, hint: 'Match source / aspect ratio canvas' },
+  { label: '720p', width: 1280, height: 720, hint: 'HD 1280×720 (or 720×1280 portrait)' },
+  { label: '1080p', width: 1920, height: 1080, hint: 'Full HD 1920×1080 (or 1080×1920 portrait)' },
+  { label: '4K', width: 3840, height: 2160, hint: 'Ultra HD 3840×2160 (or 2160×3840 portrait)' },
+] as const;
+
+const FPS_PRESETS: Array<{ label: string; value: number | null; hint: string }> = [
+  { label: 'Source', value: null, hint: 'Preserve original source frame rate' },
+  { label: '24', value: 24, hint: '24 fps cinematic cadence' },
+  { label: '30', value: 30, hint: '30 fps social & web standard' },
+  { label: '60', value: 60, hint: '60 fps high-motion playback' },
+];
+
+const ENCODER_PRESETS: Array<{ value: OutputSettings['preset']; label: string; hint: string }> = [
+  { value: 'ultrafast', label: 'Draft', hint: 'Fastest render speed (larger file)' },
+  { value: 'fast', label: 'Fast', hint: 'Quick render with balanced compression' },
+  { value: 'medium', label: 'Balanced', hint: 'Recommended H.264 quality/speed balance' },
+  { value: 'slow', label: 'Max Quality', hint: 'Best compression efficiency (slower render)' },
 ];
 
 interface ReviewExportStepProps {
@@ -49,6 +78,7 @@ interface ReviewExportStepProps {
   subtitleVersion: number;
   detectedLanguage: string | null;
   latestExportJob: ProcessingJob | undefined;
+  onUpdateSettings?: (updater: (prev: EditSettings) => EditSettings) => void;
   onFlushBeforeExport: () => Promise<number>;
   onJobUpdated: () => void;
   onBack: () => void;
@@ -65,6 +95,7 @@ export const ReviewExportStep: React.FC<ReviewExportStepProps> = ({
   subtitleVersion,
   detectedLanguage,
   latestExportJob,
+  onUpdateSettings,
   onFlushBeforeExport,
   onJobUpdated,
   onBack,
@@ -79,6 +110,50 @@ export const ReviewExportStep: React.FC<ReviewExportStepProps> = ({
   const outroDurationMs =
     settings.outro.enabled && outroAsset?.duration_ms ? outroAsset.duration_ms : 0;
   const totalExpectedMs = mainDurationMs + outroDurationMs;
+  const targetOutDims = resolveTargetOutputDimensions(
+    settings.crop,
+    sourceAsset?.width || 1920,
+    sourceAsset?.height || 1080,
+    settings.output?.width,
+    settings.output?.height
+  );
+
+  const outputCfg: OutputSettings = settings.output || {
+    width: null,
+    height: null,
+    fps: null,
+    video_codec: 'libx264',
+    audio_codec: 'aac',
+    crf: 20,
+    preset: 'medium',
+  };
+
+  const isPortraitTarget = targetOutDims.height > targetOutDims.width;
+
+  const updateOutput = (patch: Partial<OutputSettings>) => {
+    if (!onUpdateSettings) return;
+    onUpdateSettings((prev) => ({
+      ...prev,
+      output: {
+        ...(prev.output || outputCfg),
+        ...patch,
+      },
+    }));
+  };
+
+  const applyResolutionPreset = (baseW: number | null, baseH: number | null) => {
+    if (baseW === null || baseH === null) {
+      updateOutput({ width: null, height: null });
+      return;
+    }
+    if (isPortraitTarget) {
+      updateOutput({ width: baseH, height: baseW });
+    } else if (targetOutDims.width === targetOutDims.height) {
+      updateOutput({ width: baseH, height: baseH });
+    } else {
+      updateOutput({ width: baseW, height: baseH });
+    }
+  };
 
   const isRunning =
     latestExportJob &&
@@ -122,233 +197,323 @@ export const ReviewExportStep: React.FC<ReviewExportStepProps> = ({
     : -1;
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border pb-4">
-        <div>
-          <h2 className="text-lg font-bold">Step 8: Review Settings & Export MP4</h2>
-          <p className="text-xs text-muted-foreground">
-            Confirm your workflow configuration and launch an asynchronous FFmpeg export job.
-          </p>
-        </div>
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3.5">
         <div className="flex items-center gap-2.5">
-          <button
-            type="button"
-            onClick={onBack}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-border hover:bg-muted text-xs font-medium transition-colors"
-          >
-            <ArrowLeft className="h-3.5 w-3.5" />
-            Back to Edit
-          </button>
-          <button
-            type="button"
-            disabled={!sourceAsset || submitting || Boolean(isRunning)}
-            onClick={handleStartExport}
-            className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-xs font-semibold transition-all shadow-md cursor-pointer"
-          >
-            {isRunning ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Processing Export...
-              </>
-            ) : (
-              <>
-                <Sparkles className="h-4 w-4" />
-                {latestExportJob?.status === 'completed' ? 'Re-Export Video' : 'Start Export'}
-              </>
-            )}
-          </button>
+          <h2 className="text-sm font-semibold tracking-tight">Output & Export</h2>
+          <span className="px-2 py-0.5 rounded-md bg-secondary border border-border font-mono text-[11px] text-muted-foreground">
+            {targetOutDims.width}×{targetOutDims.height} · {formatFriendlyDuration(totalExpectedMs)}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <HintTooltip label="Back" detail="Return to previous editor tab">
+            <Button type="button" variant="outline" size="sm" onClick={onBack}>
+              <ArrowLeft className="h-3.5 w-3.5" />
+              Back
+            </Button>
+          </HintTooltip>
+          <HintTooltip label="Export MP4" detail="Render final MP4 with current settings">
+            <Button
+              type="button"
+              size="sm"
+              disabled={!sourceAsset || submitting || Boolean(isRunning)}
+              onClick={handleStartExport}
+              className="px-5"
+            >
+              {isRunning ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Rendering...
+                </>
+              ) : (
+                <>
+                  <Sparkles className="h-3.5 w-3.5" />
+                  {latestExportJob?.status === 'completed' ? 'Re-Export MP4' : 'Export MP4'}
+                </>
+              )}
+            </Button>
+          </HintTooltip>
         </div>
       </div>
 
       {error && (
         <div
           role="alert"
-          className="rounded-xl bg-rose-500/10 border border-rose-500/30 p-4 text-xs text-rose-300 flex items-center gap-2"
+          className="rounded-xl bg-destructive/10 border border-destructive/30 p-3.5 text-xs text-destructive flex items-center gap-2"
         >
-          <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0" />
+          <AlertTriangle className="h-4 w-4 shrink-0" />
           <span>{error}</span>
         </div>
       )}
 
-      {/* Configuration Summary Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        <div className="rounded-2xl bg-card/70 border border-border p-4 space-y-2">
-          <div className="flex items-center gap-2 text-xs font-semibold text-indigo-400">
-            <Scissors className="h-4 w-4" />
-            1. Source & Trim Range
+      {/* Output Encoding Controls */}
+      {onUpdateSettings && (
+        <div className="rounded-xl bg-card border border-border p-4 space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs font-semibold">
+              <SlidersHorizontal className="h-3.5 w-3.5 text-primary" />
+              Encoding Profile
+            </div>
+            <span className="text-[11px] font-mono text-muted-foreground">
+              H.264 · AAC · CRF {outputCfg.crf} · {outputCfg.preset}
+            </span>
           </div>
-          <div className="text-xs space-y-1 text-muted-foreground">
-            <p className="text-foreground font-medium truncate">
-              {sourceAsset?.original_filename || 'None'}
-            </p>
-            <p>
-              Interval:{' '}
-              <span className="font-mono text-foreground">
-                {formatTimecode(trimStartMs)} → {formatTimecode(trimEndMs)}
-              </span>
-            </p>
-            <p>
-              Clip Duration:{' '}
-              <span className="font-mono font-semibold text-indigo-400">
-                {formatFriendlyDuration(mainDurationMs)}
-              </span>
-            </p>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Resolution */}
+            <div className="space-y-1.5">
+              <span className="text-[11px] font-medium text-muted-foreground">Resolution</span>
+              <div className="grid grid-cols-4 gap-1">
+                {RESOLUTION_PRESETS.map((preset) => {
+                  const isAuto =
+                    preset.width === null &&
+                    outputCfg.width === null &&
+                    outputCfg.height === null;
+                  const longEdge = Math.max(outputCfg.width || 0, outputCfg.height || 0);
+                  const active = isAuto || (preset.width !== null && longEdge === preset.width);
+                  return (
+                    <HintTooltip key={preset.label} label={preset.label} detail={preset.hint}>
+                      <button
+                        type="button"
+                        onClick={() => applyResolutionPreset(preset.width, preset.height)}
+                        className={`h-7 rounded-md text-[11px] font-medium border transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-primary text-primary-foreground border-primary'
+                            : 'bg-secondary/60 border-border text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    </HintTooltip>
+                  );
+                })}
+              </div>
+              <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                <NumberInput
+                  size="sm"
+                  allowEmpty
+                  min={240}
+                  max={7680}
+                  step={2}
+                  fallbackValue={targetOutDims.width}
+                  placeholder={`W (${targetOutDims.width})`}
+                  value={outputCfg.width ?? ''}
+                  ariaLabel="Output width pixels"
+                  onValueChange={(val) =>
+                    updateOutput({
+                      width: val !== null ? Math.max(240, Math.round(val / 2) * 2) : null,
+                    })
+                  }
+                />
+                <NumberInput
+                  size="sm"
+                  allowEmpty
+                  min={240}
+                  max={7680}
+                  step={2}
+                  fallbackValue={targetOutDims.height}
+                  placeholder={`H (${targetOutDims.height})`}
+                  value={outputCfg.height ?? ''}
+                  ariaLabel="Output height pixels"
+                  onValueChange={(val) =>
+                    updateOutput({
+                      height: val !== null ? Math.max(240, Math.round(val / 2) * 2) : null,
+                    })
+                  }
+                />
+              </div>
+            </div>
+
+            {/* Frame Rate */}
+            <div className="space-y-1.5">
+              <span className="text-[11px] font-medium text-muted-foreground">Frame Rate (FPS)</span>
+              <div className="grid grid-cols-4 gap-1">
+                {FPS_PRESETS.map((fps) => {
+                  const active = (outputCfg.fps ?? null) === fps.value;
+                  return (
+                    <HintTooltip key={fps.label} label={`${fps.label} FPS`} detail={fps.hint}>
+                      <button
+                        type="button"
+                        onClick={() => updateOutput({ fps: fps.value })}
+                        className={`h-7 rounded-md text-[11px] font-medium border transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-primary text-primary-foreground border-primary'
+                            : 'bg-secondary/60 border-border text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        {fps.label}
+                      </button>
+                    </HintTooltip>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Quality (CRF) */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-[11px]">
+                <HintTooltip
+                  label="Constant Rate Factor (CRF)"
+                  detail="Lower CRF = higher visual quality & larger file (18 = lossless-like, 23 = compact)"
+                >
+                  <span className="font-medium text-muted-foreground cursor-help">
+                    Quality (CRF)
+                  </span>
+                </HintTooltip>
+                <span className="font-mono text-foreground">
+                  {outputCfg.crf}{' '}
+                  <span className="text-muted-foreground">
+                    {outputCfg.crf <= 17
+                      ? '(Ultra)'
+                      : outputCfg.crf <= 21
+                      ? '(High)'
+                      : '(Compact)'}
+                  </span>
+                </span>
+              </div>
+              <Slider
+                min={14}
+                max={28}
+                step={1}
+                value={[outputCfg.crf]}
+                onValueChange={([val]) => updateOutput({ crf: val })}
+              />
+            </div>
+
+            {/* Encoder Speed */}
+            <div className="space-y-1.5">
+              <span className="text-[11px] font-medium text-muted-foreground">Encoder Speed</span>
+              <div className="grid grid-cols-4 gap-1">
+                {ENCODER_PRESETS.map((preset) => {
+                  const active = outputCfg.preset === preset.value;
+                  return (
+                    <HintTooltip key={preset.value} label={preset.label} detail={preset.hint}>
+                      <button
+                        type="button"
+                        onClick={() => updateOutput({ preset: preset.value })}
+                        className={`h-7 rounded-md text-[10px] font-medium border transition-colors cursor-pointer truncate px-1 ${
+                          active
+                            ? 'bg-primary text-primary-foreground border-primary'
+                            : 'bg-secondary/60 border-border text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    </HintTooltip>
+                  );
+                })}
+              </div>
+            </div>
           </div>
         </div>
+      )}
 
-        <div className="rounded-2xl bg-card/70 border border-border p-4 space-y-2">
-          <div className="flex items-center gap-2 text-xs font-semibold text-indigo-400">
-            <Palette className="h-4 w-4" />
-            2. Color Grading
+      {/* Compact Summary Grid */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-2.5">
+        <div className="rounded-xl bg-card border border-border p-3 space-y-1">
+          <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+            <Scissors className="h-3.5 w-3.5 text-primary" />
+            Trim
           </div>
-          <div className="text-xs space-y-1 text-muted-foreground">
-            <p className="text-foreground font-medium">
-              {settings.color_correction?.enabled
-                ? `Enabled (${settings.color_correction.preset})`
-                : 'Original Colors (Bypassed)'}
-            </p>
-            {settings.color_correction?.enabled && (
-              <>
-                <p>
-                  Contrast / Sat:{' '}
-                  <span className="font-mono text-foreground">
-                    {settings.color_correction.contrast.toFixed(2)}× ·{' '}
-                    {settings.color_correction.saturation.toFixed(2)}×
-                  </span>
-                </p>
-                <p>
-                  WB / Sharpness:{' '}
-                  <span className="font-mono text-foreground">
-                    Temp {settings.color_correction.temperature >= 0 ? '+' : ''}
-                    {Math.round(settings.color_correction.temperature * 100)} ·{' '}
-                    {Math.round(settings.color_correction.sharpen * 100)}%
-                  </span>
-                </p>
-              </>
-            )}
-          </div>
+          <p className="text-xs font-mono font-medium text-foreground truncate">
+            {formatTimecode(trimStartMs)}–{formatTimecode(trimEndMs)}
+          </p>
+          <p className="text-[11px] font-mono text-muted-foreground">
+            {formatFriendlyDuration(mainDurationMs)}
+          </p>
         </div>
 
-        <div className="rounded-2xl bg-card/70 border border-border p-4 space-y-2">
-          <div className="flex items-center gap-2 text-xs font-semibold text-indigo-400">
-            <Volume2 className="h-4 w-4" />
-            3. Audio Noise Reduction
+        <div className="rounded-xl bg-card border border-border p-3 space-y-1">
+          <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+            <Crop className="h-3.5 w-3.5 text-primary" />
+            Ratio & Face
           </div>
-          <div className="text-xs space-y-1 text-muted-foreground">
-            <p className="text-foreground font-medium">
-              {settings.audio_enhancement?.enabled
-                ? `Enabled (${settings.audio_enhancement.preset})`
-                : 'Original Audio (Bypassed)'}
-            </p>
-            {settings.audio_enhancement?.enabled && (
-              <>
-                <p>
-                  FFT Denoise / Clarity:{' '}
-                  <span className="font-mono text-foreground">
-                    {Math.round(settings.audio_enhancement.noise_reduction * 100)}% ·{' '}
-                    {Math.round(settings.audio_enhancement.voice_clarity * 100)}%
-                  </span>
-                </p>
-                <p>
-                  Bandpass / Gain:{' '}
-                  <span className="font-mono text-foreground">
-                    {settings.audio_enhancement.highpass_hz}Hz–
-                    {(settings.audio_enhancement.lowpass_hz / 1000).toFixed(1)}kHz ·{' '}
-                    {settings.audio_enhancement.volume_db >= 0 ? '+' : ''}
-                    {settings.audio_enhancement.volume_db.toFixed(1)}dB
-                  </span>
-                </p>
-              </>
-            )}
-          </div>
+          <p className="text-xs font-medium text-foreground truncate">
+            {settings.crop?.enabled ? settings.crop.aspect_ratio.toUpperCase() : 'Original'}
+          </p>
+          <p className="text-[11px] font-mono text-muted-foreground truncate">
+            {settings.crop?.enabled && settings.crop.auto_face_framing ? 'AI Face' : `${targetOutDims.width}×${targetOutDims.height}`}
+          </p>
         </div>
 
-        <div className="rounded-2xl bg-card/70 border border-border p-4 space-y-2">
-          <div className="flex items-center gap-2 text-xs font-semibold text-indigo-400">
-            <ImageIcon className="h-4 w-4" />
-            4. Brand Logo Overlay
+        <div className="rounded-xl bg-card border border-border p-3 space-y-1">
+          <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+            <Subtitles className="h-3.5 w-3.5 text-primary" />
+            Subtitles
           </div>
-          <div className="text-xs space-y-1 text-muted-foreground">
-            <p className="text-foreground font-medium">
-              {settings.logo.enabled && logoAsset ? 'Enabled on Main Segment' : 'Disabled'}
-            </p>
-            {settings.logo.enabled && logoAsset && (
-              <>
-                <p>
-                  Position:{' '}
-                  <span className="font-mono text-foreground">
-                    {settings.logo.x_ratio !== null
-                      ? 'Custom Coordinates'
-                      : settings.logo.position}
-                  </span>
-                </p>
-                <p>
-                  Scale / Opacity:{' '}
-                  <span className="font-mono text-foreground">
-                    {Math.round(settings.logo.width_ratio * 100)}% width ·{' '}
-                    {Math.round(settings.logo.opacity * 100)}% alpha
-                  </span>
-                </p>
-              </>
-            )}
-          </div>
+          <p className="text-xs font-medium text-foreground truncate">
+            {settings.subtitles.enabled && cues.length > 0 ? `${cues.length} cues` : 'Off'}
+          </p>
+          <p className="text-[11px] font-mono text-muted-foreground truncate">
+            {settings.subtitles.enabled && cues.length > 0
+              ? `${detectedLanguage || settings.subtitles.language} · ${settings.subtitles.style.font_size}px`
+              : 'Bypassed'}
+          </p>
         </div>
 
-        <div className="rounded-2xl bg-card/70 border border-border p-4 space-y-2">
-          <div className="flex items-center gap-2 text-xs font-semibold text-indigo-400">
-            <Subtitles className="h-4 w-4" />
-            5. AI Subtitles (ASS)
+        <div className="rounded-xl bg-card border border-border p-3 space-y-1">
+          <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+            <Palette className="h-3.5 w-3.5 text-primary" />
+            Color
           </div>
-          <div className="text-xs space-y-1 text-muted-foreground">
-            <p className="text-foreground font-medium">
-              {settings.subtitles.enabled && cues.length > 0
-                ? `Enabled (${cues.length} cues · v${subtitleVersion})`
-                : 'Disabled'}
-            </p>
-            {settings.subtitles.enabled && cues.length > 0 && (
-              <>
-                <p>
-                  Language / Font:{' '}
-                  <span className="font-mono text-foreground">
-                    {detectedLanguage || settings.subtitles.language} ·{' '}
-                    {settings.subtitles.style.font_family}
-                  </span>
-                </p>
-                <p>
-                  Placement:{' '}
-                  <span className="font-mono text-foreground">
-                    {settings.subtitles.style.position} ({settings.subtitles.style.font_size}px)
-                  </span>
-                </p>
-              </>
-            )}
-          </div>
+          <p className="text-xs font-medium text-foreground capitalize truncate">
+            {settings.color_correction?.enabled ? settings.color_correction.preset : 'Off'}
+          </p>
+          <p className="text-[11px] font-mono text-muted-foreground truncate">
+            {settings.color_correction?.enabled
+              ? `C ${settings.color_correction.contrast.toFixed(2)}× · S ${settings.color_correction.saturation.toFixed(2)}×`
+              : 'Original'}
+          </p>
         </div>
 
-        <div className="rounded-2xl bg-card/70 border border-border p-4 space-y-2">
-          <div className="flex items-center gap-2 text-xs font-semibold text-indigo-400">
-            <Film className="h-4 w-4" />
-            6. Outro & Final Output
+        <div className="rounded-xl bg-card border border-border p-3 space-y-1">
+          <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+            <Volume2 className="h-3.5 w-3.5 text-primary" />
+            Audio
           </div>
-          <div className="text-xs space-y-1 text-muted-foreground">
-            <p className="text-foreground font-medium">
-              {settings.outro.enabled && outroAsset
-                ? `Outro Attached (+${formatFriendlyDuration(outroDurationMs)})`
-                : 'No Outro Attached'}
-            </p>
-            <p>
-              Total Expected Length:{' '}
-              <span className="font-mono font-semibold text-emerald-400">
-                {formatFriendlyDuration(totalExpectedMs)}
-              </span>
-            </p>
-            <p>
-              Format:{' '}
-              <span className="font-mono text-foreground">
-                MP4 (H.264 / AAC / yuv420p)
-              </span>
-            </p>
+          <p className="text-xs font-medium text-foreground capitalize truncate">
+            {settings.audio_enhancement?.enabled
+              ? settings.audio_enhancement.preset.replace(/_/g, ' ')
+              : 'Off'}
+          </p>
+          <p className="text-[11px] font-mono text-muted-foreground truncate">
+            {settings.audio_enhancement?.enabled
+              ? `${Math.round(settings.audio_enhancement.noise_reduction * 100)}% NR`
+              : 'Original'}
+          </p>
+        </div>
+
+        <div className="rounded-xl bg-card border border-border p-3 space-y-1">
+          <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+            <ImageIcon className="h-3.5 w-3.5 text-primary" />
+            Logo
           </div>
+          <p className="text-xs font-medium text-foreground truncate">
+            {settings.logo.enabled && logoAsset ? `${Math.round(settings.logo.width_ratio * 100)}% width` : 'Off'}
+          </p>
+          <p className="text-[11px] font-mono text-muted-foreground truncate">
+            {settings.logo.enabled && logoAsset
+              ? settings.logo.x_ratio !== null
+                ? 'Custom XY'
+                : settings.logo.position
+              : 'None'}
+          </p>
+        </div>
+
+        <div className="rounded-xl bg-card border border-border p-3 space-y-1">
+          <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+            <Film className="h-3.5 w-3.5 text-primary" />
+            Outro
+          </div>
+          <p className="text-xs font-medium text-foreground truncate">
+            {settings.outro.enabled && outroAsset
+              ? `+${formatFriendlyDuration(outroDurationMs)}`
+              : 'Off'}
+          </p>
+          <p className="text-[11px] font-mono text-muted-foreground truncate">
+            Total {formatFriendlyDuration(totalExpectedMs)}
+          </p>
         </div>
       </div>
 
@@ -356,89 +521,75 @@ export const ReviewExportStep: React.FC<ReviewExportStepProps> = ({
       {latestExportJob && (
         <div
           aria-live="polite"
-          className="rounded-2xl bg-card border border-border p-6 space-y-5 shadow-sm"
+          className="rounded-xl bg-card border border-border p-5 space-y-4"
         >
-          <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               {latestExportJob.status === 'completed' ? (
-                <div className="h-10 w-10 rounded-xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
-                  <CheckCircle2 className="h-5 w-5" />
+                <div className="h-9 w-9 rounded-lg bg-primary/15 border border-primary/30 flex items-center justify-center text-primary">
+                  <CheckCircle2 className="h-4 w-4" />
                 </div>
               ) : latestExportJob.status === 'failed' ||
                 latestExportJob.status === 'canceled' ? (
-                <div className="h-10 w-10 rounded-xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400">
-                  <XCircle className="h-5 w-5" />
+                <div className="h-9 w-9 rounded-lg bg-destructive/15 border border-destructive/30 flex items-center justify-center text-destructive">
+                  <XCircle className="h-4 w-4" />
                 </div>
               ) : (
-                <div className="h-10 w-10 rounded-xl bg-indigo-500/20 border border-indigo-500/40 flex items-center justify-center text-indigo-400">
-                  <Loader2 className="h-5 w-5 animate-spin" />
+                <div className="h-9 w-9 rounded-lg bg-primary/15 border border-primary/30 flex items-center justify-center text-primary">
+                  <Loader2 className="h-4 w-4 animate-spin" />
                 </div>
               )}
 
               <div>
                 <div className="flex items-center gap-2">
-                  <h3 className="text-sm font-bold">
-                    Export Job Status:{' '}
-                    <span className="uppercase tracking-wider text-indigo-400">
-                      {latestExportJob.stage.replace(/_/g, ' ')}
-                    </span>
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-foreground">
+                    {latestExportJob.stage.replace(/_/g, ' ')}
                   </h3>
                   <span className="text-[11px] font-mono text-muted-foreground">
-                    Ref: {latestExportJob.id.slice(0, 8)}
+                    #{latestExportJob.id.slice(0, 8)}
                   </span>
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  {latestExportJob.status === 'completed'
-                    ? 'Output passed FFprobe verification and is ready for download.'
-                    : latestExportJob.status === 'failed'
-                    ? latestExportJob.error_message_safe ||
-                      `Rendering failed. Reference: ${latestExportJob.id}`
-                    : latestExportJob.status === 'canceled'
-                    ? 'Export job was canceled.'
-                    : 'Executing asynchronous FFmpeg media pipeline...'}
-                </p>
+                {(latestExportJob.status === 'failed' || latestExportJob.status === 'canceled') && (
+                  <p className="text-xs text-destructive mt-0.5">
+                    {latestExportJob.error_message_safe || 'Export canceled or failed.'}
+                  </p>
+                )}
               </div>
             </div>
 
-            <div className="flex items-center gap-2.5">
+            <div className="flex items-center gap-2">
               {isRunning && (
-                <button
-                  type="button"
-                  onClick={handleCancelJob}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-rose-500/40 hover:bg-rose-500/10 text-rose-300 text-xs font-semibold"
-                >
-                  <XCircle className="h-3.5 w-3.5" />
-                  Cancel Job
-                </button>
+                <HintTooltip label="Cancel Export" detail="Abort active FFmpeg render">
+                  <Button type="button" variant="outline" size="sm" onClick={handleCancelJob}>
+                    <XCircle className="h-3.5 w-3.5 text-destructive" />
+                    Cancel
+                  </Button>
+                </HintTooltip>
               )}
 
               {(latestExportJob.status === 'failed' ||
                 latestExportJob.status === 'canceled') && (
-                <button
-                  type="button"
-                  onClick={handleRetryJob}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold"
-                >
-                  <RotateCcw className="h-3.5 w-3.5" />
-                  Retry Export
-                </button>
+                <HintTooltip label="Retry Export" detail="Re-run failed export job">
+                  <Button type="button" size="sm" onClick={handleRetryJob}>
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    Retry
+                  </Button>
+                </HintTooltip>
               )}
 
               {latestExportJob.status === 'completed' && outputAsset && (
-                <button
-                  type="button"
-                  onClick={handleDownloadOutput}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md transition-all cursor-pointer"
-                >
-                  <Download className="h-4 w-4" />
-                  Download Final MP4 ({formatBytes(outputAsset.size_bytes)})
-                </button>
+                <HintTooltip label="Download MP4" detail="Save rendered MP4 to disk">
+                  <Button type="button" size="sm" onClick={handleDownloadOutput}>
+                    <Download className="h-3.5 w-3.5" />
+                    Download MP4 ({formatBytes(outputAsset.size_bytes)})
+                  </Button>
+                </HintTooltip>
               )}
             </div>
           </div>
 
           {/* Stage Progress Pipeline Pills */}
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-2">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
             {PIPELINE_STAGES.map((stage, idx) => {
               const done =
                 latestExportJob.status === 'completed' ||
@@ -449,20 +600,20 @@ export const ReviewExportStep: React.FC<ReviewExportStepProps> = ({
               return (
                 <div
                   key={stage.key}
-                  className={`px-3 py-2 rounded-xl border text-[11px] font-medium flex items-center gap-2 ${
+                  className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-medium flex items-center gap-1.5 ${
                     done
-                      ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                      ? 'bg-secondary border-border text-foreground'
                       : active
-                      ? 'bg-indigo-600/20 border-indigo-500 text-white ring-1 ring-indigo-500/40'
-                      : 'bg-muted/30 border-border/50 text-muted-foreground'
+                      ? 'bg-primary/15 border-primary text-primary'
+                      : 'bg-background/50 border-border/60 text-muted-foreground'
                   }`}
                 >
                   <span
-                    className={`h-2 w-2 rounded-full shrink-0 ${
+                    className={`h-1.5 w-1.5 rounded-full shrink-0 ${
                       done
-                        ? 'bg-emerald-400'
+                        ? 'bg-primary'
                         : active
-                        ? 'bg-indigo-400 animate-pulse'
+                        ? 'bg-primary animate-pulse'
                         : 'bg-muted-foreground/40'
                     }`}
                   />
@@ -474,7 +625,7 @@ export const ReviewExportStep: React.FC<ReviewExportStepProps> = ({
 
           {/* Completed Output Video Player & Verification Card */}
           {latestExportJob.status === 'completed' && outputAsset?.stream_url && (
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 pt-4 border-t border-border items-center">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 pt-3 border-t border-border items-center">
               <div className="lg:col-span-7">
                 <video
                   key={`${outputAsset.id}-${outputAsset.checksum || ''}`}
@@ -482,42 +633,43 @@ export const ReviewExportStep: React.FC<ReviewExportStepProps> = ({
                   crossOrigin="anonymous"
                   controls
                   playsInline
-                  className="w-full max-h-[380px] rounded-xl bg-black border border-emerald-500/40 shadow-lg object-contain"
+                  disablePictureInPicture
+                  disableRemotePlayback
+                  className="w-full max-h-[360px] rounded-xl bg-black border border-border object-contain"
                 />
               </div>
-              <div className="lg:col-span-5 space-y-3 bg-emerald-500/5 border border-emerald-500/20 rounded-2xl p-4">
-                <div className="flex items-center gap-2 text-emerald-400 text-xs font-bold">
+              <div className="lg:col-span-5 space-y-2.5 bg-secondary/40 border border-border rounded-xl p-4">
+                <div className="flex items-center gap-1.5 text-primary text-xs font-semibold">
                   <ShieldCheck className="h-4 w-4" />
-                  FFprobe Output Verification Passed
+                  Verified Output
                 </div>
                 <div className="space-y-1.5 text-xs">
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Output File:</span>
-                    <span className="font-mono font-medium">
+                  <div className="flex justify-between gap-2">
+                    <span className="text-muted-foreground">File</span>
+                    <span className="font-mono font-medium truncate">
                       {outputAsset.original_filename}
                     </span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-muted-foreground">Verified Duration:</span>
-                    <span className="font-mono font-semibold text-emerald-400">
+                    <span className="text-muted-foreground">Duration</span>
+                    <span className="font-mono font-semibold text-foreground">
                       {formatFriendlyDuration(outputAsset.duration_ms)}
                     </span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-muted-foreground">Resolution & FPS:</span>
+                    <span className="text-muted-foreground">Resolution</span>
                     <span className="font-mono">
                       {outputAsset.width}×{outputAsset.height} @ {outputAsset.frame_rate} fps
                     </span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-muted-foreground">Codecs:</span>
+                    <span className="text-muted-foreground">Codecs</span>
                     <span className="font-mono">
-                      {outputAsset.video_codec} / {outputAsset.audio_codec || 'aac'} (
-                      {outputAsset.pixel_format})
+                      {outputAsset.video_codec} / {outputAsset.audio_codec || 'aac'}
                     </span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-muted-foreground">File Size:</span>
+                    <span className="text-muted-foreground">Size</span>
                     <span className="font-mono">{formatBytes(outputAsset.size_bytes)}</span>
                   </div>
                 </div>

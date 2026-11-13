@@ -3,6 +3,7 @@ use crate::error::{AppError, AppResult};
 use crate::media::ass_generator::{
     generate_ass_content, generate_srt_content, validate_subtitle_cues,
 };
+use crate::media::crop::analyze_video_auto_frame;
 use crate::media::demo::{generate_synthetic_logo, generate_synthetic_video};
 use crate::media::pipeline::{
     extract_audio_for_transcription, normalize_and_concat_outro, render_main_segment,
@@ -12,10 +13,11 @@ use crate::media::probe::{
     probe_image_file, probe_video_file, MediaMetadata, MAX_SOURCE_DURATION_SECS, MAX_UPLOAD_BYTES,
 };
 use crate::models::{
-    supported_languages, AssetRecord, CapabilitiesResponse, DownloadUrlResponse, EditSettings,
-    ExportCreateRequest, ProcessingJobRecord, ProjectDetailResponse, ProjectRecord,
-    ProjectUpdateRequest, SubtitleVersionResponse, SubtitleVersionUpdateRequest,
-    TranscriptionCreateRequest, UploadUrlRequest, UploadUrlResponse, ALLOWED_FONTS,
+    supported_languages, AssetRecord, AutoFrameRequest, AutoFrameResponse, CapabilitiesResponse,
+    CropSettings, DownloadUrlResponse, EditSettings, ExportCreateRequest, ProcessingJobRecord,
+    ProjectDetailResponse, ProjectRecord, ProjectUpdateRequest, SubtitleVersionResponse,
+    SubtitleVersionUpdateRequest, TranscriptionCreateRequest, UpdateProgressState,
+    UploadUrlRequest, UploadUrlResponse, ALLOWED_FONTS,
 };
 use crate::storage::StorageService;
 use crate::transcription::transcribe_audio_wav;
@@ -32,8 +34,10 @@ pub struct CelestiaEngine {
     pub storage: StorageService,
     pub data_dir: PathBuf,
     media_base_url: RwLock<String>,
-    job_semaphore: Arc<Semaphore>,
-    sample_dir: Option<PathBuf>,
+    pub(crate) job_semaphore: Arc<Semaphore>,
+    pub(crate) batch_export_mutex: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) update_state: RwLock<UpdateProgressState>,
+    pub(crate) sample_dir: Option<PathBuf>,
 }
 
 impl CelestiaEngine {
@@ -69,6 +73,8 @@ impl CelestiaEngine {
             data_dir: data_dir.to_path_buf(),
             media_base_url: RwLock::new(String::new()),
             job_semaphore: Arc::new(Semaphore::new(2)),
+            batch_export_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            update_state: RwLock::new(UpdateProgressState::default()),
             sample_dir,
         }))
     }
@@ -82,7 +88,7 @@ impl CelestiaEngine {
         self.media_base_url.read().clone()
     }
 
-    fn decorate_asset(&self, mut asset: AssetRecord) -> AssetRecord {
+    pub(crate) fn decorate_asset(&self, mut asset: AssetRecord) -> AssetRecord {
         if asset.status == "ready" {
             let (token, _) = self
                 .storage
@@ -94,6 +100,13 @@ impl CelestiaEngine {
             ));
         }
         asset
+    }
+
+    pub(crate) fn remove_asset_row_and_unref_storage(&self, asset: &AssetRecord) {
+        let _ = self.db.delete_asset_row(&asset.id);
+        if self.db.count_storage_key_refs(&asset.storage_key).unwrap_or(0) == 0 {
+            self.storage.delete_key(&asset.storage_key);
+        }
     }
 
     fn build_project_detail(&self, proj: ProjectRecord) -> AppResult<ProjectDetailResponse> {
@@ -177,13 +190,16 @@ impl CelestiaEngine {
 
     pub fn delete_project(&self, project_id: &str) -> AppResult<()> {
         let assets = self.db.list_project_assets(project_id)?;
+        self.db.delete_project(project_id)?;
         for a in assets {
-            self.storage.delete_key(&a.storage_key);
+            if self.db.count_storage_key_refs(&a.storage_key).unwrap_or(0) == 0 {
+                self.storage.delete_key(&a.storage_key);
+            }
         }
-        self.db.delete_project(project_id)
+        Ok(())
     }
 
-    fn validate_asset_kind(kind: &str) -> AppResult<()> {
+    pub(crate) fn validate_asset_kind(kind: &str) -> AppResult<()> {
         match kind {
             "source" | "logo" | "outro" => Ok(()),
             _ => Err(AppError::validation(
@@ -202,8 +218,7 @@ impl CelestiaEngine {
         let existing = self.db.list_project_assets(project_id)?;
         for old in existing {
             if old.id != new_asset.id && old.kind == new_asset.kind {
-                self.storage.delete_key(&old.storage_key);
-                let _ = self.db.delete_asset_row(&old.id);
+                self.remove_asset_row_and_unref_storage(&old);
             }
         }
 
@@ -213,6 +228,7 @@ impl CelestiaEngine {
             "source" => {
                 settings.trim.start_ms = 0;
                 settings.trim.end_ms = new_asset.duration_ms;
+                settings.crop = CropSettings::default();
             }
             "logo" => {
                 settings.logo.enabled = true;
@@ -323,7 +339,7 @@ impl CelestiaEngine {
         Ok(())
     }
 
-    async fn probe_for_kind(kind: &str, path: &Path) -> AppResult<MediaMetadata> {
+    pub(crate) async fn probe_for_kind(kind: &str, path: &Path) -> AppResult<MediaMetadata> {
         if kind == "logo" {
             let p = path.to_path_buf();
             tokio::task::spawn_blocking(move || probe_image_file(&p))
@@ -383,7 +399,7 @@ impl CelestiaEngine {
             Err(err) => {
                 asset.status = "failed".to_string();
                 let _ = self.db.update_asset(&asset);
-                self.storage.delete_key(&asset.storage_key);
+                self.remove_asset_row_and_unref_storage(&asset);
                 Err(err)
             }
         }
@@ -446,8 +462,7 @@ impl CelestiaEngine {
 
     pub fn delete_asset(&self, asset_id: &str) -> AppResult<()> {
         let asset = self.db.get_asset(asset_id)?;
-        self.storage.delete_key(&asset.storage_key);
-        self.db.delete_asset_row(asset_id)?;
+        self.remove_asset_row_and_unref_storage(&asset);
 
         if let Ok(proj) = self.db.get_project(&asset.project_id) {
             let mut settings = proj.settings_json;
@@ -758,6 +773,56 @@ impl CelestiaEngine {
         Ok(bytes.len() as u64)
     }
 
+    pub async fn auto_frame_project(
+        &self,
+        project_id: &str,
+        req: AutoFrameRequest,
+    ) -> AppResult<AutoFrameResponse> {
+        let proj = self.db.get_project(project_id)?;
+        let src_asset = self
+            .db
+            .find_ready_asset(project_id, "source", None)?
+            .ok_or_else(|| {
+                AppError::validation(
+                    "MISSING_SOURCE_ASSET",
+                    "Upload or select a source video before running Auto Face Framing.",
+                )
+            })?;
+        let src_path = self.storage.resolve_path(&src_asset.storage_key)?;
+        let src_meta = probe_video_file(&src_path, true).await?;
+
+        let scratch_dir = self
+            .data_dir
+            .join("scratch")
+            .join(format!("autoframe_{}", Uuid::new_v4()));
+
+        let result = analyze_video_auto_frame(
+            &src_path,
+            &src_meta,
+            proj.settings_json.trim.start_ms,
+            proj.settings_json.trim.end_ms,
+            &req,
+            &scratch_dir,
+        )
+        .await;
+
+        let _ = tokio::fs::remove_dir_all(&scratch_dir).await;
+        let resp = result?;
+
+        let mut updated_settings = proj.settings_json;
+        updated_settings.crop = resp.crop.clone();
+        self.db.update_project(
+            project_id,
+            None,
+            None,
+            Some(&updated_settings),
+            None,
+            None,
+        )?;
+
+        Ok(resp)
+    }
+
     pub fn start_transcription(
         self: &Arc<Self>,
         project_id: &str,
@@ -961,6 +1026,8 @@ impl CelestiaEngine {
         tokio::spawn(async move {
             if kind == "transcribe" {
                 engine_clone.execute_transcription_job(&jid).await;
+            } else if kind == "batch_export" {
+                engine_clone.execute_batch_export_job(&jid, None).await;
             } else {
                 engine_clone.execute_export_job(&jid).await;
             }
@@ -969,14 +1036,14 @@ impl CelestiaEngine {
         Ok(job)
     }
 
-    fn is_job_canceled(&self, job_id: &str) -> bool {
+    pub(crate) fn is_job_canceled(&self, job_id: &str) -> bool {
         self.db
             .get_job(job_id)
             .map(|j| j.status == "canceled")
             .unwrap_or(true)
     }
 
-    fn set_job_stage(&self, job_id: &str, stage: &str, progress: f64) -> AppResult<bool> {
+    pub(crate) fn set_job_stage(&self, job_id: &str, stage: &str, progress: f64) -> AppResult<bool> {
         let mut job = self.db.get_job(job_id)?;
         if job.status == "canceled" {
             return Ok(false);
@@ -992,7 +1059,7 @@ impl CelestiaEngine {
         Ok(true)
     }
 
-    fn fail_job(&self, job_id: &str, project_id: &str, err: AppError) {
+    pub(crate) fn fail_job(&self, job_id: &str, project_id: &str, err: AppError) {
         error!(
             job_id = job_id,
             code = %err.error_code,
@@ -1061,6 +1128,7 @@ impl CelestiaEngine {
                 s_ms,
                 e_ms,
                 &src_meta,
+                None,
                 Some(&settings.output),
             )
             .await?;
@@ -1179,6 +1247,7 @@ impl CelestiaEngine {
                 s_ms,
                 e_ms,
                 &src_meta,
+                Some(&settings.crop),
                 Some(&settings.output),
             )
             .await?;
@@ -1310,8 +1379,7 @@ impl CelestiaEngine {
             let prev_assets = self.db.list_project_assets(&project_id)?;
             for old in prev_assets {
                 if old.kind == "output" {
-                    self.storage.delete_key(&old.storage_key);
-                    let _ = self.db.delete_asset_row(&old.id);
+                    self.remove_asset_row_and_unref_storage(&old);
                 }
             }
 

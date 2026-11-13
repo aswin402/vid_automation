@@ -4,13 +4,20 @@ use celestiavid_core::{
         ass_generator::{
             generate_ass_content, generate_srt_content, hex_to_ass_color, validate_subtitle_cues,
         },
+        crop::{
+            build_crop_and_scale_video_filter, build_piecewise_linear_ffmpeg_expr,
+            compute_aspect_crop_size, resolve_target_output_dimensions,
+        },
         demo::{generate_synthetic_logo, generate_synthetic_video},
         geometry::{affine_overlay_expressions, anchor_to_ass_alignment, resolve_anchor_vector},
         pipeline::{build_audio_enhancement_filter, build_color_correction_filter},
     },
     models::{
-        AudioEnhancementSettings, ColorCorrectionSettings, ExportCreateRequest,
-        ProjectUpdateRequest, SubtitleCueItem, SubtitleStyleSettings, TranscriptionCreateRequest,
+        AudioEnhancementSettings, AutoFrameRequest, BatchApplySettingsRequest,
+        BatchExportFolderRequest, BatchFolderImportRequest, BatchItemSpec, BatchItemUpdateRequest,
+        BatchRunRequest, BatchSetItemsRequest, ColorCorrectionSettings, CropKeyframe, CropSettings,
+        ExportCreateRequest, FolderImportItem, FolderScanRequest, ProjectUpdateRequest,
+        SubtitleCueItem, SubtitleStyleSettings, TranscriptionCreateRequest,
     },
     storage::StorageService,
     CelestiaEngine,
@@ -429,4 +436,724 @@ async fn test_audio_noise_reduction_measurably_lowers_noise_floor() {
         cleaned_speech_db > -22.0,
         "Expected active voice tone to remain strong (> -22 dB), got {cleaned_speech_db:.2} dB"
     );
+}
+
+#[test]
+fn test_crop_math_and_zero_comma_dynamic_filter_builder() {
+    let mut crop = CropSettings {
+        enabled: true,
+        aspect_ratio: "9:16".into(),
+        ..CropSettings::default()
+    };
+    assert_eq!(
+        resolve_target_output_dimensions(Some(&crop), 1920, 1080, None, None),
+        (1080, 1920)
+    );
+    crop.aspect_ratio = "1:1".into();
+    assert_eq!(
+        resolve_target_output_dimensions(Some(&crop), 1080, 1920, None, None),
+        (1080, 1080)
+    );
+    crop.aspect_ratio = "4:5".into();
+    assert_eq!(
+        resolve_target_output_dimensions(Some(&crop), 1920, 1080, None, None),
+        (1080, 1350)
+    );
+    crop.aspect_ratio = "16:9".into();
+    assert_eq!(
+        resolve_target_output_dimensions(Some(&crop), 1080, 1920, None, None),
+        (1920, 1080)
+    );
+    crop.aspect_ratio = "21:9".into();
+    assert_eq!(
+        resolve_target_output_dimensions(Some(&crop), 1920, 1080, None, None),
+        (1920, 822)
+    );
+    crop.aspect_ratio = "custom".into();
+    crop.width = 0.5;
+    crop.height = 0.5;
+    assert_eq!(
+        resolve_target_output_dimensions(Some(&crop), 1920, 1080, None, None),
+        (960, 540)
+    );
+
+    let (w_9_16, h_9_16) = compute_aspect_crop_size("9:16", 1920, 1080, 1.0);
+    assert!((w_9_16 - (9.0 / 16.0) / (16.0 / 9.0)).abs() < 1e-4);
+    assert!((h_9_16 - 1.0).abs() < 1e-4);
+
+    // Piecewise-linear dynamic FFmpeg expression must have zero commas, colons, or quotes
+    let expr = build_piecewise_linear_ffmpeg_expr(&[(0.0, 100.0), (1.0, 300.0), (2.5, 180.0)], 600);
+    assert!(!expr.contains(','));
+    assert!(!expr.contains(':'));
+    assert!(!expr.contains('\''));
+    assert!(expr.contains("abs(t-"));
+
+    crop.aspect_ratio = "9:16".into();
+    crop.fit_mode = "crop".into();
+    crop.width = w_9_16;
+    crop.height = 1.0;
+    crop.dynamic_tracking = true;
+    crop.keyframes = vec![
+        CropKeyframe {
+            time_ms: 0,
+            x: 0.20,
+            y: 0.0,
+        },
+        CropKeyframe {
+            time_ms: 1500,
+            x: 0.45,
+            y: 0.0,
+        },
+    ];
+    let vf = build_crop_and_scale_video_filter(Some(&crop), 1920, 1080, 1080, 1920);
+    assert!(vf.starts_with("crop=608:1080:("));
+    assert!(vf.ends_with(",scale=1080:1920:flags=lanczos"));
+}
+
+#[tokio::test]
+async fn test_auto_face_framing_and_aspect_ratio_export_e2e() {
+    let tmp = TempDir::new().unwrap();
+    let engine = CelestiaEngine::open(&tmp.path().join("app_data"), None).unwrap();
+
+    // 1. Verify Pure-Rust UltraFace ONNX speaker framing on real sample video when available
+    let sample_vid = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sample/vid.mp4");
+    if sample_vid.is_file() {
+        let face_proj = engine.create_project("AI Speaker Framing Test").unwrap();
+        engine
+            .import_local_asset(&face_proj.id, "source", &sample_vid)
+            .await
+            .expect("import sample/vid.mp4");
+
+        // Set a short 3s trim window so multi-frame neural sampling runs super fast
+        let mut s = engine.get_project_detail(&face_proj.id).unwrap().settings_json;
+        s.trim.start_ms = 0;
+        s.trim.end_ms = Some(3000);
+        engine
+            .update_project(
+                &face_proj.id,
+                ProjectUpdateRequest {
+                    name: None,
+                    settings: Some(s),
+                },
+            )
+            .unwrap();
+
+        let resp = engine
+            .auto_frame_project(
+                &face_proj.id,
+                AutoFrameRequest {
+                    aspect_ratio: "1:1".into(),
+                    target_zoom: Some(1.0),
+                    dynamic_tracking: true,
+                },
+            )
+            .await
+            .expect("auto_frame_project on sample/vid.mp4");
+
+        assert!(
+            resp.face_detected,
+            "UltraFace ONNX should detect the speaker in sample/vid.mp4"
+        );
+        let face = resp.primary_face.expect("primary_face populated");
+        assert!(
+            face.confidence > 0.70,
+            "Expected high-confidence foreground face, got {}",
+            face.confidence
+        );
+        // Speaker's head is near the top of the 1080x1920 frame; naive center crop (y=0.219) chops his crown!
+        assert!(
+            resp.crop.y < 0.18,
+            "Expected smart headroom crop near top of frame (<0.18), got {}",
+            resp.crop.y
+        );
+        assert!(
+            !resp.crop.keyframes.is_empty(),
+            "Expected dynamic tracking keyframes"
+        );
+    }
+
+    // 2. Verify full end-to-end FFmpeg MP4 export reframing 640x360 -> 9:16 (360x640) with dynamic tracking + logo + outro
+    let media_dir = tmp.path().join("crop_inputs");
+    std::fs::create_dir_all(&media_dir).unwrap();
+    let src_video = media_dir.join("landscape_src.mp4");
+    let logo_png = media_dir.join("brand.png");
+    let outro_video = media_dir.join("outro_landscape.mp4");
+
+    generate_synthetic_video(&src_video, 2.5, 640, 360, 24, true, 300)
+        .await
+        .unwrap();
+    generate_synthetic_logo(&logo_png, 160, 48).unwrap();
+    generate_synthetic_video(&outro_video, 1.0, 640, 360, 24, true, 440)
+        .await
+        .unwrap();
+
+    let proj = engine.create_project("Vertical 9:16 Dynamic Export").unwrap();
+    engine
+        .import_local_asset(&proj.id, "source", &src_video)
+        .await
+        .unwrap();
+    let logo_asset = engine
+        .import_local_asset(&proj.id, "logo", &logo_png)
+        .await
+        .unwrap();
+    let outro_asset = engine
+        .import_local_asset(&proj.id, "outro", &outro_video)
+        .await
+        .unwrap();
+
+    let (cw, ch) = compute_aspect_crop_size("9:16", 640, 360, 1.15);
+    let mut settings = engine.get_project_detail(&proj.id).unwrap().settings_json;
+    settings.crop = CropSettings {
+        enabled: true,
+        aspect_ratio: "9:16".into(),
+        fit_mode: "crop".into(),
+        x: 0.25,
+        y: 0.05,
+        width: cw,
+        height: ch,
+        zoom: 1.15,
+        auto_face_framing: true,
+        dynamic_tracking: true,
+        detected_face: None,
+        keyframes: vec![
+            CropKeyframe {
+                time_ms: 0,
+                x: 0.18,
+                y: 0.04,
+            },
+            CropKeyframe {
+                time_ms: 1200,
+                x: 0.36,
+                y: 0.06,
+            },
+            CropKeyframe {
+                time_ms: 2500,
+                x: 0.24,
+                y: 0.05,
+            },
+        ],
+    };
+    settings.logo.enabled = true;
+    settings.logo.asset_id = Some(logo_asset.id);
+    settings.outro.enabled = true;
+    settings.outro.asset_id = Some(outro_asset.id);
+
+    engine
+        .update_project(
+            &proj.id,
+            ProjectUpdateRequest {
+                name: None,
+                settings: Some(settings),
+            },
+        )
+        .unwrap();
+
+    let exp_job = engine
+        .start_export(
+            &proj.id,
+            ExportCreateRequest {
+                subtitle_version: None,
+                idempotency_key: Some("crop-9-16-e2e".into()),
+            },
+        )
+        .unwrap();
+
+    for _ in 0..120 {
+        let j = engine.get_job(&exp_job.id).unwrap();
+        if j.status == "completed" {
+            break;
+        }
+        assert_ne!(
+            j.status, "failed",
+            "Vertical 9:16 export failed: {:?}",
+            j.error_message_safe
+        );
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    let completed = engine.get_job(&exp_job.id).unwrap();
+    assert_eq!(completed.status, "completed");
+    let out_id = completed.output_asset_id.expect("output_asset_id");
+    let detail = engine.get_project_detail(&proj.id).unwrap();
+    let out_asset = detail
+        .assets
+        .iter()
+        .find(|a| a.id == out_id)
+        .expect("output asset");
+
+    assert_eq!(
+        (out_asset.width, out_asset.height),
+        (Some(360), Some(640)),
+        "Expected 640x360 landscape + outro to export cleanly as 360x640 vertical 9:16"
+    );
+    assert_eq!(out_asset.has_audio, true);
+}
+
+#[tokio::test]
+async fn test_batch_folder_import_pairing_and_selective_automation_e2e() {
+    let tmp = TempDir::new().unwrap();
+    let engine = CelestiaEngine::open(&tmp.path().join("app_data"), None).unwrap();
+
+    // 1. Build realistic campaign folder tree: videos/, logos/, outros/
+    let campaign_dir = tmp.path().join("campaign_assets");
+    let vids_dir = campaign_dir.join("videos");
+    let logos_dir = campaign_dir.join("logos");
+    let outros_dir = campaign_dir.join("outros");
+    std::fs::create_dir_all(&vids_dir).unwrap();
+    std::fs::create_dir_all(&logos_dir).unwrap();
+    std::fs::create_dir_all(&outros_dir).unwrap();
+
+    // Intentionally include vid_1, vid_2, vid_10 to verify natural alphanumeric sorting!
+    generate_synthetic_video(&vids_dir.join("vid_10.mp4"), 1.6, 480, 270, 24, true, 350)
+        .await
+        .unwrap();
+    generate_synthetic_video(&vids_dir.join("vid_2.mp4"), 2.2, 480, 270, 24, true, 420)
+        .await
+        .unwrap();
+    generate_synthetic_video(&vids_dir.join("vid_1.mp4"), 1.8, 480, 270, 24, true, 280)
+        .await
+        .unwrap();
+
+    generate_synthetic_logo(&logos_dir.join("logo_1.png"), 120, 40).unwrap();
+    generate_synthetic_logo(&logos_dir.join("logo_2.png"), 120, 40).unwrap();
+    generate_synthetic_video(&outros_dir.join("outro_1.mp4"), 1.0, 480, 270, 24, true, 520)
+        .await
+        .unwrap();
+
+    // 2. Scan folder and assert smart role classification + natural sorting
+    let scanned = engine
+        .scan_local_folder(FolderScanRequest {
+            folder_path: campaign_dir.to_string_lossy().into_owned(),
+            recursive: true,
+            default_video_role: None,
+        })
+        .expect("scan_local_folder");
+    assert_eq!(scanned.items.len(), 6);
+
+    let scanned_videos: Vec<&str> = scanned
+        .items
+        .iter()
+        .filter(|i| i.suggested_kind == "source")
+        .map(|i| i.filename.as_str())
+        .collect();
+    assert_eq!(
+        scanned_videos,
+        vec!["vid_1.mp4", "vid_2.mp4", "vid_10.mp4"],
+        "Expected natural alphanumeric sort order so vid_2 precedes vid_10"
+    );
+    assert_eq!(
+        scanned
+            .items
+            .iter()
+            .filter(|i| i.suggested_kind == "logo")
+            .count(),
+        2
+    );
+    assert_eq!(
+        scanned
+            .items
+            .iter()
+            .filter(|i| i.suggested_kind == "outro")
+            .count(),
+        1
+    );
+
+    // 3. Create batch and zero-copy import scanned items
+    let batch = engine.create_batch("Multi-Brand Folder Campaign").unwrap();
+    // Batch internal backing projects must NOT pollute single-project dashboard list
+    assert!(engine.list_projects().unwrap().is_empty());
+
+    let import_resp = engine
+        .import_folder_items_to_batch(
+            &batch.id,
+            BatchFolderImportRequest {
+                items: scanned
+                    .items
+                    .iter()
+                    .map(|i| FolderImportItem {
+                        path: i.path.clone(),
+                        kind: i.suggested_kind.clone(),
+                    })
+                    .collect(),
+            },
+        )
+        .await
+        .expect("import_folder_items_to_batch");
+    assert_eq!(import_resp.imported_count, 6);
+    assert!(import_resp.skipped_errors.is_empty());
+
+    let detail = import_resp.batch;
+    assert_eq!(detail.videos.len(), 3);
+    assert_eq!(detail.logos.len(), 2);
+    assert_eq!(detail.outros.len(), 1);
+
+    let v1 = &detail.videos[0].id;
+    let v2 = &detail.videos[1].id;
+    let l1 = &detail.logos[0].id;
+    let l2 = &detail.logos[1].id;
+    let o1 = &detail.outros[0].id;
+
+    // 4. Configure 3 mapped rows mixing 1:1 and vice-versa (V1 -> L1 -> O1, V1 -> L2 -> O1, V2 -> L1 -> None)
+    // Select ONLY rows #1 and #2 as the Required Set; leave row #3 unselected (`selected: false`)
+    let with_items = engine
+        .set_batch_items(
+            &batch.id,
+            BatchSetItemsRequest {
+                mapping_mode: Some("manual".into()),
+                items: vec![
+                    BatchItemSpec {
+                        id: None,
+                        selected: true,
+                        title: Some("V1_BrandA".into()),
+                        source_asset_id: Some(v1.clone()),
+                        logo_asset_id: Some(l1.clone()),
+                        outro_asset_id: Some(o1.clone()),
+                        use_custom_settings: None,
+                    },
+                    BatchItemSpec {
+                        id: None,
+                        selected: true,
+                        title: Some("V1_BrandB_ViceVersa".into()),
+                        source_asset_id: Some(v1.clone()),
+                        logo_asset_id: Some(l2.clone()),
+                        outro_asset_id: Some(o1.clone()),
+                        use_custom_settings: None,
+                    },
+                    BatchItemSpec {
+                        id: None,
+                        selected: false,
+                        title: Some("V2_Unselected_Draft".into()),
+                        source_asset_id: Some(v2.clone()),
+                        logo_asset_id: Some(l1.clone()),
+                        outro_asset_id: None,
+                        use_custom_settings: None,
+                    },
+                ],
+            },
+        )
+        .expect("set_batch_items");
+    assert_eq!(with_items.items.len(), 3);
+
+    // Manually tweak row #2 title via update_batch_item
+    let row1_id = with_items.items[0].id.clone();
+    let row2_id = with_items.items[1].id.clone();
+    let row3_id = with_items.items[2].id.clone();
+    engine
+        .update_batch_item(
+            &batch.id,
+            &row2_id,
+            BatchItemUpdateRequest {
+                title: Some("V1_BrandB_Custom".into()),
+                selected: None,
+                source_asset_id: None,
+                logo_asset_id: None,
+                clear_logo: false,
+                outro_asset_id: None,
+                clear_outro: false,
+                use_custom_settings: None,
+                settings: None,
+            },
+        )
+        .unwrap();
+
+    // 5. Apply custom dragged logo position + color grading across the Required Set (rows #1 & #2)
+    let mut custom_settings = with_items.shared_settings.clone();
+    custom_settings.logo.enabled = true;
+    custom_settings.logo.x_ratio = Some(0.82);
+    custom_settings.logo.y_ratio = Some(0.08);
+    custom_settings.logo.width_ratio = 0.18;
+    custom_settings.color_correction.enabled = true;
+    custom_settings.color_correction.contrast = 1.12;
+    custom_settings.outro.enabled = true;
+
+    let applied = engine
+        .apply_settings_to_batch_items(
+            &batch.id,
+            BatchApplySettingsRequest {
+                item_ids: vec![row1_id.clone(), row2_id.clone()],
+                settings: custom_settings,
+                update_shared: true,
+            },
+        )
+        .expect("apply_settings_to_batch_items");
+    assert_eq!(applied.items[0].settings.logo.x_ratio, Some(0.82));
+    assert_eq!(applied.items[1].settings.logo.x_ratio, Some(0.82));
+    // Verify each row preserved its own distinct logo_asset_id!
+    assert_eq!(
+        applied.items[0].settings.logo.asset_id.is_some(),
+        true
+    );
+    assert_ne!(
+        applied.items[0].settings.logo.asset_id,
+        applied.items[1].settings.logo.asset_id
+    );
+
+    // 6. Run batch automation on selected set (`item_ids: None` defaults to `selected == true`)
+    let run_resp = engine
+        .run_batch_automation(
+            &batch.id,
+            BatchRunRequest {
+                item_ids: None,
+                force_reexport: false,
+            },
+        )
+        .expect("run_batch_automation");
+    assert_eq!(
+        run_resp.launched_count, 2,
+        "Only the 2 selected rows in the required set should launch"
+    );
+
+    for _ in 0..160 {
+        let cur = engine.get_batch_detail(&batch.id).unwrap();
+        let r1 = cur.items.iter().find(|i| i.id == row1_id).unwrap();
+        let r2 = cur.items.iter().find(|i| i.id == row2_id).unwrap();
+        assert_ne!(
+            r1.status, "failed",
+            "Batch row 1 failed: {:?}",
+            r1.error_message_safe
+        );
+        assert_ne!(
+            r2.status, "failed",
+            "Batch row 2 failed: {:?}",
+            r2.error_message_safe
+        );
+        // Sequential queue invariant: row #1 and row #2 must never be in `"processing"` simultaneously!
+        assert!(
+            !(r1.status == "processing" && r2.status == "processing"),
+            "Bulk queue must process one by one, never both processing simultaneously"
+        );
+        if r1.status == "completed" && r2.status == "completed" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    let final_batch = engine.get_batch_detail(&batch.id).unwrap();
+    let r1 = final_batch.items.iter().find(|i| i.id == row1_id).unwrap();
+    let r2 = final_batch.items.iter().find(|i| i.id == row2_id).unwrap();
+    let r3 = final_batch.items.iter().find(|i| i.id == row3_id).unwrap();
+
+    assert_eq!(r1.status, "completed");
+    assert_eq!(r2.status, "completed");
+    assert!(
+        r1.active_job_id.is_none(),
+        "Completed row must clear active_job_id"
+    );
+    assert!(
+        r2.active_job_id.is_none(),
+        "Completed row must clear active_job_id"
+    );
+    assert!(r1.output_asset.is_some());
+    assert!(r2.output_asset.is_some());
+    assert_eq!(
+        r3.status, "draft",
+        "Unselected row #3 must remain untouched in draft state"
+    );
+    assert!(r3.output_asset.is_none());
+
+    // 7. Export completed selected MP4s to local destination folder
+    let export_dir = tmp.path().join("batch_exported_mp4s");
+    let export_resp = engine
+        .export_batch_outputs_to_folder(
+            &batch.id,
+            BatchExportFolderRequest {
+                dest_dir: export_dir.to_string_lossy().into_owned(),
+                item_ids: None,
+            },
+        )
+        .await
+        .expect("export_batch_outputs_to_folder");
+    assert_eq!(export_resp.exported_count, 2);
+    assert_eq!(export_resp.files.len(), 2);
+    for path_str in &export_resp.files {
+        let meta = std::fs::metadata(path_str).expect("exported file exists");
+        assert!(meta.len() > 1024);
+    }
+
+    // 7b. Single-row export (`item_ids: Some(vec![row3_id])`) exports row #3 individually even when unselected
+    let single_run = engine
+        .run_batch_automation(
+            &batch.id,
+            BatchRunRequest {
+                item_ids: Some(vec![row3_id.clone()]),
+                force_reexport: true,
+            },
+        )
+        .expect("single-row run_batch_automation");
+    assert_eq!(single_run.launched_count, 1);
+
+    for _ in 0..120 {
+        let cur = engine.get_batch_detail(&batch.id).unwrap();
+        let r3_cur = cur.items.iter().find(|i| i.id == row3_id).unwrap();
+        assert_ne!(
+            r3_cur.status, "failed",
+            "Single row #3 export failed: {:?}",
+            r3_cur.error_message_safe
+        );
+        if r3_cur.status == "completed" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    let after_single = engine.get_batch_detail(&batch.id).unwrap();
+    let r3_done = after_single.items.iter().find(|i| i.id == row3_id).unwrap();
+    assert_eq!(r3_done.status, "completed");
+    assert!(r3_done.output_asset.is_some());
+    assert!(r3_done.active_job_id.is_none());
+
+    // 8. Delete batch and confirm clean removal
+    engine.delete_batch(&batch.id).expect("delete_batch");
+    assert!(engine.list_batches().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_app_data_backup_restore_and_auto_update_pipeline() {
+    use axum::{routing::get, Json, Router};
+    use celestiavid_core::models::CreateBackupRequest;
+    use serde_json::json;
+
+    let tmp = TempDir::new().unwrap();
+    let data_dir = tmp.path().join("app_data_updater");
+    let engine = CelestiaEngine::open(&data_dir, None).unwrap();
+
+    // 1. Seed user project, batch campaign, and managed storage file
+    let proj = engine.create_project("Important Client Video").unwrap();
+    let batch = engine.create_batch("Q4 Brand Campaign").unwrap();
+    let managed_marker = data_dir.join("storage").join("brand_marker.txt");
+    std::fs::create_dir_all(managed_marker.parent().unwrap()).unwrap();
+    std::fs::write(&managed_marker, b"preserved-brand-asset").unwrap();
+
+    // 2. Create manual backup snapshot
+    let manual_snap = engine
+        .create_backup(CreateBackupRequest {
+            label: Some("Before Experiment".into()),
+            include_storage: Some(true),
+        })
+        .expect("create_backup");
+    assert_eq!(manual_snap.project_count, 1);
+    assert_eq!(manual_snap.batch_count, 1);
+    assert!(manual_snap.includes_storage);
+    assert!(manual_snap.size_bytes > 0);
+
+    // 3. Mutate/delete live state and managed file, then restore from backup online
+    engine.delete_project(&proj.id).unwrap();
+    engine.delete_batch(&batch.id).unwrap();
+    std::fs::remove_file(&managed_marker).unwrap();
+    assert!(engine.list_projects().unwrap().is_empty());
+    assert!(engine.list_batches().unwrap().is_empty());
+
+    let restore_resp = engine
+        .restore_backup(&manual_snap.id)
+        .expect("restore_backup");
+    assert_eq!(restore_resp.restored_projects, 1);
+    assert_eq!(restore_resp.restored_batches, 1);
+    assert!(!restore_resp.safety_backup_id.is_empty());
+    assert_eq!(engine.list_projects().unwrap().len(), 1);
+    assert_eq!(engine.list_batches().unwrap().len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&managed_marker).unwrap(),
+        "preserved-brand-asset"
+    );
+
+    // 4. Spin up local mock GitHub Release HTTP feed serving v9.9.9 + binary installer payload
+    let fake_payload: Vec<u8> = (0..131_072).map(|i| (i % 251) as u8).collect();
+    let payload_len = fake_payload.len() as u64;
+    let payload_for_route = fake_payload.clone();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let download_url = format!("http://{addr}/download/CelestiaVid_9.9.9_amd64.AppImage");
+
+    let mock_router = Router::new()
+        .route(
+            "/releases/latest",
+            get(move || {
+                let dl = download_url.clone();
+                async move {
+                    Json(json!({
+                        "tag_name": "v9.9.9",
+                        "name": "CelestiaVid v9.9.9 Studio Update",
+                        "body": "- Clean minimal TUI installer\n- Automatic app data backup & 1-click self-update",
+                        "published_at": "2026-11-12T08:00:00Z",
+                        "html_url": "https://github.com/aswin402/vid_automation/releases/tag/v9.9.9",
+                        "assets": [
+                            {
+                                "name": "CelestiaVid_9.9.9_amd64.AppImage",
+                                "browser_download_url": dl,
+                                "size": payload_len
+                            }
+                        ]
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/download/CelestiaVid_9.9.9_amd64.AppImage",
+            get(move || {
+                let bytes = payload_for_route.clone();
+                async move {
+                    (
+                        [(axum::http::header::CONTENT_LENGTH, bytes.len().to_string())],
+                        bytes,
+                    )
+                }
+            }),
+        );
+
+    let server_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, mock_router).await;
+    });
+
+    std::env::set_var(
+        "CELESTIAVID_UPDATE_MANIFEST_URL",
+        format!("http://{addr}/releases/latest"),
+    );
+    std::env::set_var("CELESTIAVID_UPDATER_STAGE_ONLY", "1");
+
+    let check = engine.check_for_updates().await.expect("check_for_updates");
+    assert!(check.update_available);
+    assert_eq!(check.latest_version, "9.9.9");
+    assert_eq!(check.asset_size_bytes, Some(payload_len));
+
+    let started = engine.start_app_update().expect("start_app_update");
+    assert!(matches!(
+        started.status.as_str(),
+        "checking" | "backing_up" | "downloading" | "ready_to_restart"
+    ));
+
+    for _ in 0..80 {
+        let st = engine.get_update_status();
+        assert_ne!(
+            st.status, "failed",
+            "Auto-update pipeline failed: {:?}",
+            st.error_message_safe
+        );
+        if st.status == "ready_to_restart" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let final_st = engine.get_update_status();
+    assert_eq!(final_st.status, "ready_to_restart");
+    assert_eq!(final_st.progress, 1.0);
+    assert_eq!(final_st.downloaded_bytes, payload_len);
+    let pre_update_snap = final_st
+        .backup_info
+        .expect("Automatic pre-update backup must be attached");
+    assert_eq!(pre_update_snap.reason, "pre-update");
+    assert_eq!(pre_update_snap.project_count, 1);
+    assert_eq!(pre_update_snap.batch_count, 1);
+
+    let staged_file = std::path::PathBuf::from(
+        final_st
+            .installer_path
+            .expect("staged installer_path set"),
+    );
+    assert!(staged_file.is_file());
+    assert_eq!(std::fs::metadata(&staged_file).unwrap().len(), payload_len);
+
+    std::env::remove_var("CELESTIAVID_UPDATE_MANIFEST_URL");
+    std::env::remove_var("CELESTIAVID_UPDATER_STAGE_ONLY");
+    server_handle.abort();
 }

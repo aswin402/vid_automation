@@ -1,4 +1,5 @@
 import React from 'react';
+import { HintTooltip } from '@/components/ui/tooltip';
 import type { AnchorPosition } from '@/types/video';
 
 const POSITIONS: Array<{ id: AnchorPosition; label: string }> = [
@@ -24,44 +25,48 @@ export const PositionGridPicker: React.FC<PositionGridPickerProps> = ({
   value,
   customCoordinatesActive = false,
   onChange,
-  label = '9-Anchor Position Grid',
+  label = 'Anchor',
 }) => {
   return (
-    <div className="space-y-2">
+    <div className="space-y-1.5">
       <div className="flex items-center justify-between">
         <span className="text-xs font-medium text-muted-foreground">{label}</span>
-        <span className="text-xs font-mono text-indigo-400">
-          {customCoordinatesActive ? 'Custom Drag' : value}
+        <span className="text-[11px] font-mono text-primary">
+          {customCoordinatesActive ? 'custom x/y' : value}
         </span>
       </div>
       <div
         role="radiogroup"
         aria-label={label}
-        className="grid grid-cols-3 gap-1.5 p-2 rounded-xl bg-muted/40 border border-border w-36"
+        className="grid grid-cols-3 gap-1 p-1.5 rounded-xl bg-muted/50 border border-border w-32"
       >
         {POSITIONS.map((pos) => {
           const selected = !customCoordinatesActive && value === pos.id;
           return (
-            <button
+            <HintTooltip
               key={pos.id}
-              type="button"
-              role="radio"
-              aria-checked={selected}
-              aria-label={pos.label}
-              title={pos.label}
-              onClick={() => onChange(pos.id)}
-              className={`h-8 rounded-lg flex items-center justify-center border transition-all ${
-                selected
-                  ? 'bg-indigo-600 border-indigo-400 text-white shadow-sm'
-                  : 'bg-card/70 border-border/60 hover:border-indigo-500/50 text-muted-foreground'
-              }`}
+              label={`Snap ${pos.label}`}
+              side="top"
             >
-              <span
-                className={`h-2 w-2 rounded-full ${
-                  selected ? 'bg-white' : 'bg-muted-foreground/50'
+              <button
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                aria-label={pos.label}
+                onClick={() => onChange(pos.id)}
+                className={`h-7 rounded-md flex items-center justify-center border transition-all ${
+                  selected
+                    ? 'bg-primary border-primary text-primary-foreground shadow-xs'
+                    : 'bg-card border-border/70 hover:border-primary/50 text-muted-foreground'
                 }`}
-              />
-            </button>
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    selected ? 'bg-primary-foreground' : 'bg-muted-foreground/50'
+                  }`}
+                />
+              </button>
+            </HintTooltip>
           );
         })}
       </div>

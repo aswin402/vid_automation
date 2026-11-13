@@ -2,10 +2,16 @@ use crate::engine::CelestiaEngine;
 use crate::error::{AppError, AppResult};
 use crate::media::probe::MAX_UPLOAD_BYTES;
 use crate::models::{
-    CapabilitiesResponse, DownloadUrlResponse, ExportCreateRequest, ProcessingJobRecord,
-    ProjectCreateRequest, ProjectDetailResponse, ProjectUpdateRequest,
-    SubtitleVersionResponse, SubtitleVersionUpdateRequest, TranscriptionCreateRequest,
-    UploadCompleteRequest, UploadUrlRequest, UploadUrlResponse,
+    AutoFrameRequest, AutoFrameResponse, BackupInfo, BatchApplySettingsRequest, BatchCreateRequest,
+    BatchDetailResponse, BatchExportFolderRequest, BatchExportFolderResponse,
+    BatchFolderImportRequest, BatchFolderImportResponse, BatchItemUpdateRequest, BatchRunRequest,
+    BatchRunResponse, BatchSetItemsRequest, BatchSummaryResponse, BatchUpdateRequest,
+    CapabilitiesResponse, CreateBackupRequest, DownloadUrlResponse, ExportCreateRequest,
+    FolderScanRequest, FolderScanResponse, ProcessingJobRecord, ProjectCreateRequest,
+    ProjectDetailResponse, ProjectUpdateRequest, RestoreBackupResponse, SubtitleVersionResponse,
+    SubtitleVersionUpdateRequest, SystemVersionResponse, TranscriptionCreateRequest,
+    UpdateCheckResponse, UpdateProgressState, UploadCompleteRequest, UploadUrlRequest,
+    UploadUrlResponse,
 };
 use axum::{
     body::{Body, Bytes},
@@ -84,6 +90,10 @@ pub fn build_router(engine: Arc<CelestiaEngine>) -> Router {
             post(start_transcription_handler),
         )
         .route(
+            "/api/v1/projects/{project_id}/auto-frame",
+            post(auto_frame_project_handler),
+        )
+        .route(
             "/api/v1/projects/{project_id}/subtitle-versions/{version}",
             get(get_subtitle_version_handler).put(save_subtitle_version_handler),
         )
@@ -98,8 +108,77 @@ pub fn build_router(engine: Arc<CelestiaEngine>) -> Router {
         .route("/api/v1/jobs/{job_id}", get(get_job_handler))
         .route("/api/v1/jobs/{job_id}/cancel", post(cancel_job_handler))
         .route("/api/v1/jobs/{job_id}/retry", post(retry_job_handler))
+        .route("/api/v1/fs/scan-folder", post(scan_folder_handler))
+        .route(
+            "/api/v1/batches",
+            get(list_batches_handler).post(create_batch_handler),
+        )
+        .route("/api/v1/batches/demo", post(create_demo_batch_handler))
+        .route(
+            "/api/v1/batches/{batch_id}",
+            get(get_batch_handler)
+                .patch(update_batch_handler)
+                .delete(delete_batch_handler),
+        )
+        .route(
+            "/api/v1/batches/{batch_id}/assets/upload-url",
+            post(create_batch_pool_upload_url_handler),
+        )
+        .route(
+            "/api/v1/batches/{batch_id}/assets/complete",
+            post(complete_batch_pool_upload_handler),
+        )
+        .route(
+            "/api/v1/batches/{batch_id}/assets/{asset_id}",
+            delete(delete_batch_pool_asset_handler),
+        )
+        .route(
+            "/api/v1/batches/{batch_id}/import-folder",
+            post(import_folder_to_batch_handler),
+        )
+        .route(
+            "/api/v1/batches/{batch_id}/items",
+            put(set_batch_items_handler),
+        )
+        .route(
+            "/api/v1/batches/{batch_id}/items/{item_id}",
+            patch_only_item_route(),
+        )
+        .route(
+            "/api/v1/batches/{batch_id}/apply-settings",
+            post(apply_settings_to_batch_items_handler),
+        )
+        .route(
+            "/api/v1/batches/{batch_id}/run",
+            post(run_batch_automation_handler),
+        )
+        .route(
+            "/api/v1/batches/{batch_id}/export-folder",
+            post(export_batch_outputs_to_folder_handler),
+        )
+        .route("/api/v1/system/version", get(get_system_version_handler))
+        .route("/api/v1/system/update-check", get(check_for_updates_handler))
+        .route("/api/v1/system/update", post(start_app_update_handler))
+        .route("/api/v1/system/update-status", get(get_update_status_handler))
+        .route("/api/v1/system/restart", post(apply_update_restart_handler))
+        .route(
+            "/api/v1/system/backups",
+            get(list_backups_handler).post(create_backup_handler),
+        )
+        .route(
+            "/api/v1/system/backups/{backup_id}",
+            delete(delete_backup_handler),
+        )
+        .route(
+            "/api/v1/system/backups/{backup_id}/restore",
+            post(restore_backup_handler),
+        )
         .layer(cors)
         .with_state(engine)
+}
+
+fn patch_only_item_route() -> axum::routing::MethodRouter<Arc<CelestiaEngine>> {
+    axum::routing::patch(update_batch_item_handler)
 }
 
 /// Spawns an ephemeral loopback HTTP range server (`127.0.0.1:0`) for Tauri Desktop
@@ -388,6 +467,15 @@ async fn start_export_handler(
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
+async fn auto_frame_project_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Path(project_id): Path<String>,
+    Json(req): Json<AutoFrameRequest>,
+) -> AppResult<Json<AutoFrameResponse>> {
+    let resp = engine.auto_frame_project(&project_id, req).await?;
+    Ok(Json(resp))
+}
+
 async fn get_job_handler(
     State(engine): State<Arc<CelestiaEngine>>,
     Path(job_id): Path<String>,
@@ -407,4 +495,208 @@ async fn retry_job_handler(
     Path(job_id): Path<String>,
 ) -> AppResult<Json<ProcessingJobRecord>> {
     Ok(Json(engine.retry_job(&job_id)?))
+}
+
+async fn scan_folder_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Json(req): Json<FolderScanRequest>,
+) -> AppResult<Json<FolderScanResponse>> {
+    Ok(Json(engine.scan_local_folder(req)?))
+}
+
+async fn list_batches_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+) -> AppResult<Json<Vec<BatchSummaryResponse>>> {
+    Ok(Json(engine.list_batches()?))
+}
+
+async fn create_batch_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Json(req): Json<BatchCreateRequest>,
+) -> AppResult<(StatusCode, Json<BatchDetailResponse>)> {
+    let batch = engine.create_batch(&req.name)?;
+    Ok((StatusCode::CREATED, Json(batch)))
+}
+
+async fn create_demo_batch_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+) -> AppResult<(StatusCode, Json<BatchDetailResponse>)> {
+    let batch = engine.create_demo_batch().await?;
+    Ok((StatusCode::CREATED, Json(batch)))
+}
+
+async fn get_batch_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Path(batch_id): Path<String>,
+) -> AppResult<Json<BatchDetailResponse>> {
+    Ok(Json(engine.get_batch_detail(&batch_id)?))
+}
+
+async fn update_batch_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Path(batch_id): Path<String>,
+    Json(req): Json<BatchUpdateRequest>,
+) -> AppResult<Json<BatchDetailResponse>> {
+    Ok(Json(engine.update_batch(&batch_id, req)?))
+}
+
+async fn delete_batch_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Path(batch_id): Path<String>,
+) -> AppResult<StatusCode> {
+    engine.delete_batch(&batch_id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn create_batch_pool_upload_url_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Path(batch_id): Path<String>,
+    Json(req): Json<UploadUrlRequest>,
+) -> AppResult<Json<UploadUrlResponse>> {
+    Ok(Json(engine.create_batch_pool_upload_url(&batch_id, req)?))
+}
+
+async fn complete_batch_pool_upload_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Path(batch_id): Path<String>,
+    Json(req): Json<UploadCompleteRequest>,
+) -> AppResult<Json<crate::models::AssetRecord>> {
+    let asset = engine
+        .complete_batch_pool_upload(&batch_id, &req.asset_id)
+        .await?;
+    Ok(Json(asset))
+}
+
+async fn delete_batch_pool_asset_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Path((batch_id, asset_id)): Path<(String, String)>,
+) -> AppResult<Json<BatchDetailResponse>> {
+    Ok(Json(engine.delete_batch_pool_asset(&batch_id, &asset_id)?))
+}
+
+async fn import_folder_to_batch_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Path(batch_id): Path<String>,
+    Json(req): Json<BatchFolderImportRequest>,
+) -> AppResult<Json<BatchFolderImportResponse>> {
+    Ok(Json(engine.import_folder_items_to_batch(&batch_id, req).await?))
+}
+
+async fn set_batch_items_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Path(batch_id): Path<String>,
+    Json(req): Json<BatchSetItemsRequest>,
+) -> AppResult<Json<BatchDetailResponse>> {
+    Ok(Json(engine.set_batch_items(&batch_id, req)?))
+}
+
+async fn update_batch_item_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Path((batch_id, item_id)): Path<(String, String)>,
+    Json(req): Json<BatchItemUpdateRequest>,
+) -> AppResult<Json<BatchDetailResponse>> {
+    Ok(Json(engine.update_batch_item(&batch_id, &item_id, req)?))
+}
+
+async fn apply_settings_to_batch_items_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Path(batch_id): Path<String>,
+    Json(req): Json<BatchApplySettingsRequest>,
+) -> AppResult<Json<BatchDetailResponse>> {
+    Ok(Json(engine.apply_settings_to_batch_items(&batch_id, req)?))
+}
+
+async fn run_batch_automation_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Path(batch_id): Path<String>,
+    Json(req): Json<BatchRunRequest>,
+) -> AppResult<(StatusCode, Json<BatchRunResponse>)> {
+    let resp = engine.run_batch_automation(&batch_id, req)?;
+    Ok((StatusCode::ACCEPTED, Json(resp)))
+}
+
+async fn export_batch_outputs_to_folder_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Path(batch_id): Path<String>,
+    Json(req): Json<BatchExportFolderRequest>,
+) -> AppResult<Json<BatchExportFolderResponse>> {
+    Ok(Json(engine.export_batch_outputs_to_folder(&batch_id, req).await?))
+}
+
+async fn get_system_version_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+) -> Json<SystemVersionResponse> {
+    Json(engine.get_system_version())
+}
+
+async fn check_for_updates_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+) -> AppResult<Json<UpdateCheckResponse>> {
+    Ok(Json(engine.check_for_updates().await?))
+}
+
+async fn start_app_update_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+) -> AppResult<(StatusCode, Json<UpdateProgressState>)> {
+    let state = engine.start_app_update()?;
+    Ok((StatusCode::ACCEPTED, Json(state)))
+}
+
+async fn get_update_status_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+) -> Json<UpdateProgressState> {
+    Json(engine.get_update_status())
+}
+
+async fn apply_update_restart_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+) -> AppResult<Json<serde_json::Value>> {
+    engine.trigger_post_update_helper()?;
+    Ok(Json(json!({ "restarting": true, "mode": "http" })))
+}
+
+async fn list_backups_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+) -> AppResult<Json<Vec<BackupInfo>>> {
+    Ok(Json(engine.list_backups()?))
+}
+
+async fn create_backup_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Json(req): Json<CreateBackupRequest>,
+) -> AppResult<(StatusCode, Json<BackupInfo>)> {
+    let info = tokio::task::spawn_blocking(move || engine.create_backup(req))
+        .await
+        .map_err(|e| {
+            AppError::internal(
+                "BACKUP_WORKER_ERROR",
+                "Backup worker failed.",
+                e.to_string(),
+            )
+        })??;
+    Ok((StatusCode::CREATED, Json(info)))
+}
+
+async fn restore_backup_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Path(backup_id): Path<String>,
+) -> AppResult<Json<RestoreBackupResponse>> {
+    let resp = tokio::task::spawn_blocking(move || engine.restore_backup(&backup_id))
+        .await
+        .map_err(|e| {
+            AppError::internal(
+                "RESTORE_WORKER_ERROR",
+                "Restore worker failed.",
+                e.to_string(),
+            )
+        })??;
+    Ok(Json(resp))
+}
+
+async fn delete_backup_handler(
+    State(engine): State<Arc<CelestiaEngine>>,
+    Path(backup_id): Path<String>,
+) -> AppResult<StatusCode> {
+    engine.delete_backup(&backup_id)?;
+    Ok(StatusCode::NO_CONTENT)
 }

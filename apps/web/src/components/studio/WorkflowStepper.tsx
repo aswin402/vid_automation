@@ -2,6 +2,7 @@ import React from 'react';
 import {
   Upload,
   Scissors,
+  Crop,
   Sliders,
   Volume2,
   Image as ImageIcon,
@@ -20,20 +21,22 @@ interface StepItem {
   icon: React.ComponentType<{ className?: string }>;
 }
 
-export const WORKFLOW_STEPS: StepItem[] = [
+const WORKFLOW_STEPS: StepItem[] = [
   { id: 'upload', number: 1, label: 'Upload', icon: Upload },
   { id: 'trim', number: 2, label: 'Trim', icon: Scissors },
-  { id: 'color', number: 3, label: 'Color Grade', optional: true, icon: Sliders },
-  { id: 'audio', number: 4, label: 'Audio Clean', optional: true, icon: Volume2 },
-  { id: 'logo', number: 5, label: 'Logo', optional: true, icon: ImageIcon },
-  { id: 'subtitles', number: 6, label: 'Subtitles', optional: true, icon: Subtitles },
-  { id: 'outro', number: 7, label: 'Outro', optional: true, icon: Film },
-  { id: 'export', number: 8, label: 'Export', icon: Sparkles },
+  { id: 'crop', number: 3, label: 'Frame & Crop', optional: true, icon: Crop },
+  { id: 'color', number: 4, label: 'Color Grade', optional: true, icon: Sliders },
+  { id: 'audio', number: 5, label: 'Audio Clean', optional: true, icon: Volume2 },
+  { id: 'logo', number: 6, label: 'Logo', optional: true, icon: ImageIcon },
+  { id: 'subtitles', number: 7, label: 'Subtitles', optional: true, icon: Subtitles },
+  { id: 'outro', number: 8, label: 'Outro', optional: true, icon: Film },
+  { id: 'export', number: 9, label: 'Export', icon: Sparkles },
 ];
 
 interface WorkflowStepperProps {
   activeStep: WorkflowStepId;
   hasSourceVideo: boolean;
+  hasCrop: boolean;
   hasColorCorrection: boolean;
   hasAudioEnhancement: boolean;
   hasLogo: boolean;
@@ -45,6 +48,7 @@ interface WorkflowStepperProps {
 export const WorkflowStepper: React.FC<WorkflowStepperProps> = ({
   activeStep,
   hasSourceVideo,
+  hasCrop,
   hasColorCorrection,
   hasAudioEnhancement,
   hasLogo,
@@ -57,6 +61,7 @@ export const WorkflowStepper: React.FC<WorkflowStepperProps> = ({
   const stepCompletionMap: Record<WorkflowStepId, boolean> = {
     upload: hasSourceVideo,
     trim: hasSourceVideo,
+    crop: hasCrop,
     color: hasColorCorrection,
     audio: hasAudioEnhancement,
     logo: hasLogo,
@@ -67,7 +72,7 @@ export const WorkflowStepper: React.FC<WorkflowStepperProps> = ({
 
   return (
     <nav aria-label="Video editing workflow steps" className="w-full">
-      <ol className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
+      <ol className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-9 gap-2">
         {WORKFLOW_STEPS.map((step, idx) => {
           const Icon = step.icon;
           const isActive = step.id === activeStep;

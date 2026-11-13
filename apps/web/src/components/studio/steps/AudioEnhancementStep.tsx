@@ -203,6 +203,7 @@ export const AudioEnhancementStep: React.FC<AudioEnhancementStepProps> = ({
 }) => {
   const [saving, setSaving] = useState(false);
   const [comparingOriginal, setComparingOriginal] = useState(false);
+  const [isPreviewFullscreen, setIsPreviewFullscreen] = useState(false);
 
   const audio: AudioEnhancementSettings = settings.audio_enhancement || {
     enabled: false,
@@ -264,12 +265,216 @@ export const AudioEnhancementStep: React.FC<AudioEnhancementStepProps> = ({
     }
   };
 
+  const inspectorNode = (
+    <div className="space-y-5 bg-card/70 border border-border rounded-2xl p-5">
+      {/* Enable Toggle & Hold-to-Compare */}
+      <div className="flex items-center justify-between gap-2">
+        <label className="flex items-center gap-2.5 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={audio.enabled}
+            onChange={(e) => {
+              const checked = e.target.checked;
+              onUpdateSettings((prev) => {
+                const current = prev.audio_enhancement || audio;
+                const shouldApplyCleanDefault =
+                  checked &&
+                  current.noise_reduction === 0 &&
+                  current.voice_clarity === 0;
+                return {
+                  ...prev,
+                  audio_enhancement: {
+                    ...current,
+                    enabled: checked,
+                    ...(shouldApplyCleanDefault
+                      ? {
+                          preset: 'clean_voice',
+                          ...AUDIO_PRESETS[1].values,
+                        }
+                      : {}),
+                  },
+                };
+              });
+            }}
+            className="h-4 w-4 rounded accent-indigo-500"
+          />
+          <span className="text-sm font-semibold flex items-center gap-1.5">
+            <Volume2 className="h-4 w-4 text-indigo-400" />
+            Enable Audio Noise Reduction
+          </span>
+        </label>
+
+        <div className="flex items-center gap-2">
+          {audio.enabled && (
+            <button
+              type="button"
+              onPointerDown={() => setComparingOriginal(true)}
+              onPointerUp={() => setComparingOriginal(false)}
+              onPointerLeave={() => setComparingOriginal(false)}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-muted hover:bg-muted/80 text-[11px] font-medium text-foreground select-none cursor-pointer border border-border"
+              title="Press and hold while playing to compare with raw audio"
+            >
+              <Ear className="h-3 w-3 text-indigo-400" />
+              Hold to Compare
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={handleResetFlat}
+            className="inline-flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300 font-medium"
+          >
+            <RotateCcw className="h-3 w-3" />
+            Reset
+          </button>
+        </div>
+      </div>
+
+      {/* 6 One-Click Audio Presets */}
+      <div className="space-y-2">
+        <span className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
+          <Sparkles className="h-3.5 w-3.5 text-indigo-400" />
+          One-Click Voice & Denoise Presets
+        </span>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          {AUDIO_PRESETS.map((preset) => {
+            const isSelected =
+              audio.preset === preset.id &&
+              (preset.id === 'neutral' ? !audio.enabled : audio.enabled);
+            return (
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() => applyPreset(preset)}
+                className={`px-2.5 py-2 rounded-xl border text-left transition-all cursor-pointer ${
+                  isSelected
+                    ? 'bg-indigo-600/20 border-indigo-500 text-foreground ring-1 ring-indigo-500/40'
+                    : 'bg-background/60 border-border hover:border-indigo-500/40 text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <span className="text-xs font-semibold truncate">
+                    {preset.label}
+                  </span>
+                  {isSelected && (
+                    <Check className="h-3 w-3 text-indigo-400 shrink-0" />
+                  )}
+                </div>
+                <span className="block text-[10px] text-muted-foreground truncate">
+                  {preset.badge}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* 5 Fine-Tune Sliders */}
+      <div className="space-y-3.5 pt-3 border-t border-border">
+        {AUDIO_SLIDERS.map((slider) => {
+          const val = Number(audio[slider.key] ?? slider.defaultValue);
+          const isModified = Math.abs(val - slider.defaultValue) > 0.005;
+          return (
+            <div key={slider.key} className="space-y-1">
+              <div className="flex items-center justify-between text-xs">
+                <label
+                  htmlFor={`audio-slider-${slider.key}`}
+                  className="font-medium text-muted-foreground"
+                >
+                  {slider.label}
+                </label>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`font-mono font-semibold ${
+                      isModified && audio.enabled
+                        ? 'text-indigo-400'
+                        : 'text-foreground'
+                    }`}
+                  >
+                    {slider.formatDisplay(val)}
+                  </span>
+                  {isModified && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleSliderChange(slider.key, slider.defaultValue)
+                      }
+                      className="text-[10px] text-muted-foreground hover:text-foreground underline"
+                    >
+                      reset
+                    </button>
+                  )}
+                </div>
+              </div>
+              <input
+                id={`audio-slider-${slider.key}`}
+                type="range"
+                min={slider.min}
+                max={slider.max}
+                step={slider.step}
+                value={val}
+                onChange={(e) =>
+                  handleSliderChange(slider.key, Number(e.target.value))
+                }
+                className="w-full accent-indigo-500 cursor-pointer h-1.5 bg-muted rounded-lg"
+              />
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Speech Leveler & AI Transcription Denoising Options */}
+      <div className="pt-3 border-t border-border space-y-2.5">
+        <label className="flex items-center gap-2.5 cursor-pointer text-xs text-muted-foreground hover:text-foreground">
+          <input
+            type="checkbox"
+            checked={audio.normalize_loudness}
+            onChange={(e) =>
+              onUpdateSettings((prev) => ({
+                ...prev,
+                audio_enhancement: {
+                  ...prev.audio_enhancement,
+                  enabled: true,
+                  normalize_loudness: e.target.checked,
+                },
+              }))
+            }
+            className="h-3.5 w-3.5 rounded accent-indigo-500"
+          />
+          <span>
+            Enable Dynamic Speech Leveler (<code className="text-[11px]">acompressor</code>) to balance quiet and loud words
+          </span>
+        </label>
+
+        <label className="flex items-center gap-2.5 cursor-pointer text-xs text-muted-foreground hover:text-foreground">
+          <input
+            type="checkbox"
+            checked={audio.apply_to_transcription}
+            onChange={(e) =>
+              onUpdateSettings((prev) => ({
+                ...prev,
+                audio_enhancement: {
+                  ...prev.audio_enhancement,
+                  apply_to_transcription: e.target.checked,
+                },
+              }))
+            }
+            className="h-3.5 w-3.5 rounded accent-indigo-500"
+          />
+          <span className="flex items-center gap-1">
+            <Mic className="h-3.5 w-3.5 text-indigo-400 shrink-0" />
+            Denoise audio before running AI Subtitle Transcription (improves speech recognition accuracy)
+          </span>
+        </label>
+      </div>
+    </div>
+  );
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border pb-4">
         <div>
           <h2 className="text-lg font-bold">
-            Step 4: Audio Noise Reduction & Voice Clarity (Optional)
+            Step 5: Audio Noise Reduction & Voice Clarity (Optional)
           </h2>
           <p className="text-xs text-muted-foreground">
             Suppress background hum, fan noise, and room hiss using adaptive FFT spectral denoising (`afftdn`), rumble/hiss filters, and 3kHz vocal presence boost.
@@ -306,6 +511,8 @@ export const AudioEnhancementStep: React.FC<AudioEnhancementStepProps> = ({
             currentTimeMs={currentTimeMs}
             onTimeUpdate={onTimeUpdate}
             bypassAudioEnhancement={comparingOriginal}
+            fullscreenInspector={inspectorNode}
+            onFullscreenChange={setIsPreviewFullscreen}
             onDragLogo={(xr, yr) =>
               onUpdateSettings((prev) => ({
                 ...prev,
@@ -343,207 +550,7 @@ export const AudioEnhancementStep: React.FC<AudioEnhancementStepProps> = ({
           )}
         </div>
 
-        <div className="lg:col-span-5 space-y-5 bg-card/70 border border-border rounded-2xl p-5">
-          {/* Enable Toggle & Hold-to-Compare */}
-          <div className="flex items-center justify-between gap-2">
-            <label className="flex items-center gap-2.5 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={audio.enabled}
-                onChange={(e) => {
-                  const checked = e.target.checked;
-                  onUpdateSettings((prev) => {
-                    const current = prev.audio_enhancement || audio;
-                    const shouldApplyCleanDefault =
-                      checked &&
-                      current.noise_reduction === 0 &&
-                      current.voice_clarity === 0;
-                    return {
-                      ...prev,
-                      audio_enhancement: {
-                        ...current,
-                        enabled: checked,
-                        ...(shouldApplyCleanDefault
-                          ? {
-                              preset: 'clean_voice',
-                              ...AUDIO_PRESETS[1].values,
-                            }
-                          : {}),
-                      },
-                    };
-                  });
-                }}
-                className="h-4 w-4 rounded accent-indigo-500"
-              />
-              <span className="text-sm font-semibold flex items-center gap-1.5">
-                <Volume2 className="h-4 w-4 text-indigo-400" />
-                Enable Audio Noise Reduction
-              </span>
-            </label>
-
-            <div className="flex items-center gap-2">
-              {audio.enabled && (
-                <button
-                  type="button"
-                  onPointerDown={() => setComparingOriginal(true)}
-                  onPointerUp={() => setComparingOriginal(false)}
-                  onPointerLeave={() => setComparingOriginal(false)}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-muted hover:bg-muted/80 text-[11px] font-medium text-foreground select-none cursor-pointer border border-border"
-                  title="Press and hold while playing to compare with raw audio"
-                >
-                  <Ear className="h-3 w-3 text-indigo-400" />
-                  Hold to Compare
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={handleResetFlat}
-                className="inline-flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300 font-medium"
-              >
-                <RotateCcw className="h-3 w-3" />
-                Reset
-              </button>
-            </div>
-          </div>
-
-          {/* 6 One-Click Audio Presets */}
-          <div className="space-y-2">
-            <span className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
-              <Sparkles className="h-3.5 w-3.5 text-indigo-400" />
-              One-Click Voice & Denoise Presets
-            </span>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-              {AUDIO_PRESETS.map((preset) => {
-                const isSelected =
-                  audio.preset === preset.id &&
-                  (preset.id === 'neutral' ? !audio.enabled : audio.enabled);
-                return (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    onClick={() => applyPreset(preset)}
-                    className={`px-2.5 py-2 rounded-xl border text-left transition-all cursor-pointer ${
-                      isSelected
-                        ? 'bg-indigo-600/20 border-indigo-500 text-foreground ring-1 ring-indigo-500/40'
-                        : 'bg-background/60 border-border hover:border-indigo-500/40 text-muted-foreground hover:text-foreground'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-1">
-                      <span className="text-xs font-semibold truncate">
-                        {preset.label}
-                      </span>
-                      {isSelected && (
-                        <Check className="h-3 w-3 text-indigo-400 shrink-0" />
-                      )}
-                    </div>
-                    <span className="block text-[10px] text-muted-foreground truncate">
-                      {preset.badge}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* 5 Fine-Tune Sliders */}
-          <div className="space-y-3.5 pt-3 border-t border-border">
-            {AUDIO_SLIDERS.map((slider) => {
-              const val = Number(audio[slider.key] ?? slider.defaultValue);
-              const isModified = Math.abs(val - slider.defaultValue) > 0.005;
-              return (
-                <div key={slider.key} className="space-y-1">
-                  <div className="flex items-center justify-between text-xs">
-                    <label
-                      htmlFor={`audio-slider-${slider.key}`}
-                      className="font-medium text-muted-foreground"
-                    >
-                      {slider.label}
-                    </label>
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`font-mono font-semibold ${
-                          isModified && audio.enabled
-                            ? 'text-indigo-400'
-                            : 'text-foreground'
-                        }`}
-                      >
-                        {slider.formatDisplay(val)}
-                      </span>
-                      {isModified && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleSliderChange(slider.key, slider.defaultValue)
-                          }
-                          className="text-[10px] text-muted-foreground hover:text-foreground underline"
-                        >
-                          reset
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                  <input
-                    id={`audio-slider-${slider.key}`}
-                    type="range"
-                    min={slider.min}
-                    max={slider.max}
-                    step={slider.step}
-                    value={val}
-                    onChange={(e) =>
-                      handleSliderChange(slider.key, Number(e.target.value))
-                    }
-                    className="w-full accent-indigo-500 cursor-pointer h-1.5 bg-muted rounded-lg"
-                  />
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Speech Leveler & AI Transcription Denoising Options */}
-          <div className="pt-3 border-t border-border space-y-2.5">
-            <label className="flex items-center gap-2.5 cursor-pointer text-xs text-muted-foreground hover:text-foreground">
-              <input
-                type="checkbox"
-                checked={audio.normalize_loudness}
-                onChange={(e) =>
-                  onUpdateSettings((prev) => ({
-                    ...prev,
-                    audio_enhancement: {
-                      ...prev.audio_enhancement,
-                      enabled: true,
-                      normalize_loudness: e.target.checked,
-                    },
-                  }))
-                }
-                className="h-3.5 w-3.5 rounded accent-indigo-500"
-              />
-              <span>
-                Enable Dynamic Speech Leveler (<code className="text-[11px]">acompressor</code>) to balance quiet and loud words
-              </span>
-            </label>
-
-            <label className="flex items-center gap-2.5 cursor-pointer text-xs text-muted-foreground hover:text-foreground">
-              <input
-                type="checkbox"
-                checked={audio.apply_to_transcription}
-                onChange={(e) =>
-                  onUpdateSettings((prev) => ({
-                    ...prev,
-                    audio_enhancement: {
-                      ...prev.audio_enhancement,
-                      apply_to_transcription: e.target.checked,
-                    },
-                  }))
-                }
-                className="h-3.5 w-3.5 rounded accent-indigo-500"
-              />
-              <span className="flex items-center gap-1">
-                <Mic className="h-3.5 w-3.5 text-indigo-400 shrink-0" />
-                Denoise audio before running AI Subtitle Transcription (improves speech recognition accuracy)
-              </span>
-            </label>
-          </div>
-        </div>
+        <div className="lg:col-span-5">{!isPreviewFullscreen && inspectorNode}</div>
       </div>
     </div>
   );

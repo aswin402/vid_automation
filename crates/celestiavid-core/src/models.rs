@@ -53,6 +53,76 @@ impl Default for TrimSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FaceBox {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CropKeyframe {
+    pub time_ms: i64,
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CropSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_original_aspect")]
+    pub aspect_ratio: String,
+    #[serde(default = "default_crop_fit_mode")]
+    pub fit_mode: String,
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+    #[serde(default = "default_one")]
+    pub width: f64,
+    #[serde(default = "default_one")]
+    pub height: f64,
+    #[serde(default = "default_one")]
+    pub zoom: f64,
+    #[serde(default)]
+    pub auto_face_framing: bool,
+    #[serde(default)]
+    pub dynamic_tracking: bool,
+    #[serde(default)]
+    pub detected_face: Option<FaceBox>,
+    #[serde(default)]
+    pub keyframes: Vec<CropKeyframe>,
+}
+
+fn default_original_aspect() -> String {
+    "original".into()
+}
+fn default_crop_fit_mode() -> String {
+    "crop".into()
+}
+
+impl Default for CropSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            aspect_ratio: "original".into(),
+            fit_mode: "crop".into(),
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            zoom: 1.0,
+            auto_face_framing: false,
+            dynamic_tracking: false,
+            detected_face: None,
+            keyframes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputSettings {
     #[serde(default)]
     pub width: Option<u32>,
@@ -355,6 +425,8 @@ pub struct EditSettings {
     #[serde(default)]
     pub trim: TrimSettings,
     #[serde(default)]
+    pub crop: CropSettings,
+    #[serde(default)]
     pub output: OutputSettings,
     #[serde(default)]
     pub color_correction: ColorCorrectionSettings,
@@ -378,6 +450,7 @@ impl Default for EditSettings {
         Self {
             schema_version: 1,
             trim: TrimSettings::default(),
+            crop: CropSettings::default(),
             output: OutputSettings::default(),
             color_correction: ColorCorrectionSettings::default(),
             audio_enhancement: AudioEnhancementSettings::default(),
@@ -565,4 +638,362 @@ pub struct ExportCreateRequest {
     pub subtitle_version: Option<i64>,
     #[serde(default)]
     pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoFrameRequest {
+    #[serde(default = "default_original_aspect")]
+    pub aspect_ratio: String,
+    #[serde(default)]
+    pub dynamic_tracking: bool,
+    #[serde(default)]
+    pub target_zoom: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoFrameResponse {
+    pub face_detected: bool,
+    pub sampled_frames: usize,
+    pub faces_found_frames: usize,
+    pub primary_face: Option<FaceBox>,
+    pub crop: CropSettings,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchRecord {
+    pub id: String,
+    pub owner_id: String,
+    pub name: String,
+    pub library_project_id: String,
+    pub shared_settings_json: EditSettings,
+    pub mapping_mode: String,
+    pub output_dir: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchItemRecord {
+    pub id: String,
+    pub batch_id: String,
+    pub sort_order: usize,
+    pub selected: bool,
+    pub title: String,
+    pub project_id: String,
+    pub source_asset_id: Option<String>,
+    pub logo_asset_id: Option<String>,
+    pub outro_asset_id: Option<String>,
+    pub use_custom_settings: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchSummaryResponse {
+    pub id: String,
+    pub name: String,
+    pub mapping_mode: String,
+    pub output_dir: Option<String>,
+    pub video_count: usize,
+    pub logo_count: usize,
+    pub outro_count: usize,
+    pub item_count: usize,
+    pub selected_count: usize,
+    pub completed_count: usize,
+    pub processing_count: usize,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchItemDetail {
+    pub id: String,
+    pub batch_id: String,
+    pub sort_order: usize,
+    pub selected: bool,
+    pub title: String,
+    pub project_id: String,
+    pub source_asset_id: Option<String>,
+    pub logo_asset_id: Option<String>,
+    pub outro_asset_id: Option<String>,
+    pub use_custom_settings: bool,
+    pub settings: EditSettings,
+    pub status: String,
+    pub stage: String,
+    pub progress: Option<f64>,
+    pub error_message_safe: Option<String>,
+    pub active_job_id: Option<String>,
+    pub subtitle_cue_count: usize,
+    pub output_asset: Option<AssetRecord>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchDetailResponse {
+    pub id: String,
+    pub name: String,
+    pub library_project_id: String,
+    pub mapping_mode: String,
+    pub output_dir: Option<String>,
+    pub shared_settings: EditSettings,
+    pub videos: Vec<AssetRecord>,
+    pub logos: Vec<AssetRecord>,
+    pub outros: Vec<AssetRecord>,
+    pub items: Vec<BatchItemDetail>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchCreateRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchUpdateRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub mapping_mode: Option<String>,
+    #[serde(default)]
+    pub output_dir: Option<String>,
+    #[serde(default)]
+    pub clear_output_dir: bool,
+    #[serde(default)]
+    pub shared_settings: Option<EditSettings>,
+    #[serde(default)]
+    pub apply_shared_to_selected: bool,
+}
+
+fn default_true_bool() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchItemSpec {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default = "default_true_bool")]
+    pub selected: bool,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub source_asset_id: Option<String>,
+    #[serde(default)]
+    pub logo_asset_id: Option<String>,
+    #[serde(default)]
+    pub outro_asset_id: Option<String>,
+    #[serde(default)]
+    pub use_custom_settings: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchSetItemsRequest {
+    #[serde(default)]
+    pub mapping_mode: Option<String>,
+    pub items: Vec<BatchItemSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchItemUpdateRequest {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub selected: Option<bool>,
+    #[serde(default)]
+    pub source_asset_id: Option<String>,
+    #[serde(default)]
+    pub logo_asset_id: Option<String>,
+    #[serde(default)]
+    pub clear_logo: bool,
+    #[serde(default)]
+    pub outro_asset_id: Option<String>,
+    #[serde(default)]
+    pub clear_outro: bool,
+    #[serde(default)]
+    pub use_custom_settings: Option<bool>,
+    #[serde(default)]
+    pub settings: Option<EditSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchApplySettingsRequest {
+    pub item_ids: Vec<String>,
+    pub settings: EditSettings,
+    #[serde(default)]
+    pub update_shared: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchRunRequest {
+    #[serde(default)]
+    pub item_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub force_reexport: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchRunResponse {
+    pub batch_id: String,
+    pub launched_count: usize,
+    pub job_ids: Vec<String>,
+    pub batch: BatchDetailResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolderScanRequest {
+    pub folder_path: String,
+    #[serde(default = "default_true_bool")]
+    pub recursive: bool,
+    #[serde(default)]
+    pub default_video_role: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScannedFolderItem {
+    pub path: String,
+    pub relative_path: String,
+    pub filename: String,
+    pub size_bytes: u64,
+    pub suggested_kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolderScanResponse {
+    pub folder_path: String,
+    pub items: Vec<ScannedFolderItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolderImportItem {
+    pub path: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchFolderImportRequest {
+    pub items: Vec<FolderImportItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchFolderImportResponse {
+    pub imported_count: usize,
+    pub skipped_errors: Vec<String>,
+    pub batch: BatchDetailResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchExportFolderRequest {
+    pub dest_dir: String,
+    #[serde(default)]
+    pub item_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchExportFolderResponse {
+    pub exported_count: usize,
+    pub dest_dir: String,
+    pub files: Vec<String>,
+}
+
+// ==================== App Data Backup & Self-Updater Models ====================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupInfo {
+    pub id: String,
+    pub label: String,
+    pub reason: String,
+    pub app_version: String,
+    pub created_at: String,
+    pub path: String,
+    pub size_bytes: u64,
+    pub project_count: usize,
+    pub batch_count: usize,
+    pub asset_count: usize,
+    pub includes_storage: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CreateBackupRequest {
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub include_storage: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestoreBackupResponse {
+    pub restored_backup_id: String,
+    pub safety_backup_id: String,
+    pub restored_projects: usize,
+    pub restored_batches: usize,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemVersionResponse {
+    pub current_version: String,
+    pub os: String,
+    pub arch: String,
+    pub data_dir: String,
+    pub backups_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateCheckResponse {
+    pub current_version: String,
+    pub latest_version: String,
+    pub update_available: bool,
+    pub release_name: String,
+    pub release_notes: String,
+    pub published_at: Option<String>,
+    pub html_url: String,
+    pub asset_name: Option<String>,
+    pub asset_download_url: Option<String>,
+    pub asset_size_bytes: Option<u64>,
+    pub install_strategy: String,
+    pub checked_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateProgressState {
+    pub status: String,
+    pub stage: String,
+    pub progress: f64,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub current_version: String,
+    pub target_version: Option<String>,
+    pub backup_info: Option<BackupInfo>,
+    pub installer_path: Option<String>,
+    pub install_strategy: Option<String>,
+    pub can_auto_restart: bool,
+    pub message: String,
+    pub error_message_safe: Option<String>,
+    pub started_at: Option<String>,
+    pub updated_at: String,
+}
+
+impl Default for UpdateProgressState {
+    fn default() -> Self {
+        Self {
+            status: "idle".into(),
+            stage: "idle".into(),
+            progress: 0.0,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            target_version: None,
+            backup_info: None,
+            installer_path: None,
+            install_strategy: None,
+            can_auto_restart: false,
+            message: "Ready to check for updates.".into(),
+            error_message_safe: None,
+            started_at: None,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
 }
