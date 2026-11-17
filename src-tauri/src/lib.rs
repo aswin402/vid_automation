@@ -389,7 +389,7 @@ fn apply_settings_to_batch_items(
 }
 
 #[tauri::command]
-fn run_batch_automation(
+async fn run_batch_automation(
     engine: State<'_, Arc<CelestiaEngine>>,
     batch_id: String,
     req: BatchRunRequest,
@@ -421,7 +421,7 @@ async fn check_for_updates(
 }
 
 #[tauri::command]
-fn start_app_update(
+async fn start_app_update(
     engine: State<'_, Arc<CelestiaEngine>>,
 ) -> Result<UpdateProgressState, AppError> {
     engine.start_app_update()

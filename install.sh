@@ -431,14 +431,14 @@ install_linux_deb() {
   do_apt_install() {
     if [[ "$(id -u)" -eq 0 ]]; then
       apt-get update -qq
-      apt-get install -y "${deb_file}"
-      if [[ -x "/usr/bin/celestiavid-desktop" ]] && [[ ! -e "/usr/local/bin/celestiavid" ]]; then
+      apt-get install -y --reinstall --allow-downgrades "${deb_file}"
+      if [[ -x "/usr/bin/celestiavid-desktop" ]]; then
         ln -sf /usr/bin/celestiavid-desktop /usr/local/bin/celestiavid || true
       fi
     else
       sudo apt-get update -qq
-      sudo apt-get install -y "${deb_file}"
-      if [[ -x "/usr/bin/celestiavid-desktop" ]] && [[ ! -e "/usr/local/bin/celestiavid" ]]; then
+      sudo apt-get install -y --reinstall --allow-downgrades "${deb_file}"
+      if [[ -x "/usr/bin/celestiavid-desktop" ]]; then
         sudo ln -sf /usr/bin/celestiavid-desktop /usr/local/bin/celestiavid || true
       fi
     fi
