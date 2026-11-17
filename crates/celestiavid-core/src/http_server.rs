@@ -21,12 +21,13 @@ use axum::{
     routing::{delete, get, post, put},
     Json, Router,
 };
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
 use std::io::SeekFrom;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
@@ -270,12 +271,55 @@ async fn upload_binary_handler(
     State(engine): State<Arc<CelestiaEngine>>,
     Path(asset_id): Path<String>,
     Query(query): Query<TokenQuery>,
-    body: Bytes,
+    body: Body,
 ) -> AppResult<Json<serde_json::Value>> {
-    engine
-        .write_upload_bytes(&asset_id, query.token.as_deref(), true, &body)
-        .await?;
-    Ok(Json(json!({ "uploaded": true, "bytes": body.len() })))
+    let dest = engine.verify_upload_target(&asset_id, query.token.as_deref(), true)?;
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    let mut file = tokio::fs::File::create(&dest).await?;
+    let mut stream = body.into_data_stream();
+    let mut total_written: u64 = 0;
+
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = match chunk_res {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&dest).await;
+                return Err(AppError::validation(
+                    "UPLOAD_STREAM_INTERRUPTED",
+                    format!("Upload stream interrupted: {e}"),
+                ));
+            }
+        };
+        total_written = total_written.saturating_add(chunk.len() as u64);
+        if total_written > MAX_UPLOAD_BYTES {
+            drop(file);
+            let _ = tokio::fs::remove_file(&dest).await;
+            return Err(AppError::new(
+                "UPLOAD_TOO_LARGE",
+                "Uploaded payload exceeds maximum allowed size.",
+                413,
+            ));
+        }
+        if let Err(e) = file.write_all(&chunk).await {
+            let _ = tokio::fs::remove_file(&dest).await;
+            return Err(e.into());
+        }
+    }
+
+    if total_written == 0 {
+        drop(file);
+        let _ = tokio::fs::remove_file(&dest).await;
+        return Err(AppError::validation(
+            "EMPTY_UPLOAD",
+            "Uploaded payload cannot be empty.",
+        ));
+    }
+
+    file.flush().await?;
+    Ok(Json(json!({ "uploaded": true, "bytes": total_written })))
 }
 
 async fn complete_upload_handler(

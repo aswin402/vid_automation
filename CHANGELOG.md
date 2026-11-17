@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [0.2.4] - 2026-11-17
+
+### Fixed — Windows Desktop Stability & Crash Prevention
+- **16 MB Windows PE & Worker Thread Stacks (`.cargo/config.toml`, `src-tauri/.cargo/config.toml`, `src-tauri/src/lib.rs`, `transcription.rs`, `crop.rs`)**:
+  - Raised Windows MSVC PE stack reserve (`/STACK:16777216`), Tauri Tokio runtime worker stack size (`16 MB`), and dedicated `whisper.cpp` / `tract-onnx` worker threads (`16 MB` with `catch_unwind`) to eliminate `STATUS_STACK_OVERFLOW` (`0xC00000FD`) crashes on Windows' 1 MB default stack.
+- **Portable x86-64 `whisper.cpp` SIMD & GGML Model Integrity (`.github/workflows/release-desktop.yml`, `transcription.rs`)**:
+  - Disabled host-CPU `GGML_NATIVE` / `GGML_AVX512` instructions in CI builds so Windows installers compiled on GitHub Actions server CPUs never trigger `STATUS_ILLEGAL_INSTRUCTION` (`0xC000001D`) on consumer Intel/AMD PCs, and added GGML magic-header + size verification before loading `ggml-base.bin`.
+- **Zero-Buffer Loopback Streaming Uploads & Drag-Drop Safety (`videoApi.ts`, `http_server.rs`, `tauri.conf.json`, `RootLayout.tsx`)**:
+  - Replaced JSON-serialized `Array.from(new Uint8Array(buf))` IPC uploads with chunked HTTP binary streaming directly to the local loopback server (`127.0.0.1`), preventing WebView2 out-of-memory crashes when dragging large MP4 clips on Windows.
+- **Shared Singleton `AudioContext` (`InteractiveVideoPreview.tsx`)**:
+  - Consolidated Web Audio preview chains onto a single shared `AudioContext` initialized lazily on playback, preventing WASAPI / WebView2 audio thread exhaustion when multiple videos have `Clean Voice` enabled by default.
+
+---
+
 ## [0.2.3] - 2026-11-13
 
 ### Added — Master Control Inheritance, Step-by-Step Batch Workflow & Scrollable Output Queue

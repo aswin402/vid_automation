@@ -530,36 +530,65 @@ pub async fn analyze_video_auto_frame(
     .await?;
 
     let scratch_owned = scratch_dir.to_path_buf();
-    let detections: Vec<(i64, Option<FaceBox>)> = tokio::task::spawn_blocking(move || {
-        let mut frame_files = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&scratch_owned) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.extension().and_then(|e| e.to_str()) == Some("jpg") {
-                    frame_files.push(p);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("celestiavid-onnx-face".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut frame_files = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&scratch_owned) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.extension().and_then(|e| e.to_str()) == Some("jpg") {
+                            frame_files.push(p);
+                        }
+                    }
                 }
-            }
-        }
-        frame_files.sort();
+                frame_files.sort();
 
-        let total = frame_files.len();
-        let mut results = Vec::with_capacity(total);
-        for (idx, path) in frame_files.into_iter().enumerate() {
-            let rel_ms = if total <= 1 {
-                0
-            } else {
-                ((idx as f64 / (total - 1) as f64) * trimmed_dur_ms as f64).round() as i64
-            };
-            let primary = image::open(&path)
-                .ok()
-                .and_then(|img| detect_faces_in_image(&img).ok())
-                .and_then(|faces| pick_primary_speaker(&faces));
-            results.push((rel_ms, primary));
-        }
-        results
-    })
-    .await
-    .map_err(|e| AppError::internal("AUTO_FRAME_FAILED", "Face detection worker failed.", e.to_string()))?;
+                let total = frame_files.len();
+                let mut results = Vec::with_capacity(total);
+                for (idx, path) in frame_files.into_iter().enumerate() {
+                    let rel_ms = if total <= 1 {
+                        0
+                    } else {
+                        ((idx as f64 / (total - 1) as f64) * trimmed_dur_ms as f64).round() as i64
+                    };
+                    let primary = image::open(&path)
+                        .ok()
+                        .and_then(|img| detect_faces_in_image(&img).ok())
+                        .and_then(|faces| pick_primary_speaker(&faces));
+                    results.push((rel_ms, primary));
+                }
+                results
+            }));
+            let _ = tx.send(out);
+        })
+        .map_err(|e| {
+            AppError::internal(
+                "AUTO_FRAME_FAILED",
+                "Failed to spawn ONNX face detection worker.",
+                e.to_string(),
+            )
+        })?;
+
+    let detections: Vec<(i64, Option<FaceBox>)> = rx
+        .await
+        .map_err(|e| {
+            AppError::internal(
+                "AUTO_FRAME_FAILED",
+                "Face detection worker channel closed.",
+                e.to_string(),
+            )
+        })?
+        .map_err(|_| {
+            AppError::internal(
+                "AUTO_FRAME_FAILED",
+                "Face detection neural model encountered an unexpected panic.",
+                "onnx_worker_panic",
+            )
+        })?;
 
     let sampled_frames = detections.len();
     let found_faces: Vec<(i64, FaceBox)> = detections

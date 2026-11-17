@@ -924,10 +924,13 @@ impl CelestiaEngine {
                 .map(ToString::to_string)
                 .unwrap_or(auto_title);
 
-            if let Some(existing_id) = spec.id.as_ref().filter(|id| existing_map.contains_key(*id))
+            if let Some((existing_id, existing_item)) = spec
+                .id
+                .as_ref()
+                .and_then(|id| existing_map.get(id).map(|it| (id, it.clone())))
             {
                 kept_ids.insert(existing_id.clone());
-                let mut item = existing_map.get(existing_id).unwrap().clone();
+                let mut item = existing_item;
                 let source_changed = item.source_asset_id != spec.source_asset_id;
                 let logo_newly_added =
                     item.logo_asset_id.is_none() && spec.logo_asset_id.is_some();

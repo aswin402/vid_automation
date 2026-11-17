@@ -28,8 +28,17 @@ import type {
   UpdateProgressState,
 } from '@/types/video';
 
+let cachedTauriLoopbackBaseUrl: string | null = null;
+
 export function isTauriDesktop(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
+async function resolveTauriLoopbackBaseUrl(): Promise<string> {
+  if (cachedTauriLoopbackBaseUrl) return cachedTauriLoopbackBaseUrl;
+  const base = await invoke<string>('get_media_server_base_url');
+  cachedTauriLoopbackBaseUrl = base.replace(/\/+$/, '');
+  return cachedTauriLoopbackBaseUrl;
 }
 
 export function extractApiError(err: unknown, fallback: string): string {
@@ -161,11 +170,11 @@ export const videoApi = {
     file: File,
     onProgress?: (percent: number) => void
   ): Promise<Asset> {
+    let basePrefix = '';
     if (isTauriDesktop()) {
-      onProgress?.(20);
-      // Tauri WebView files dropped from desktop sometimes expose native path; otherwise pass ArrayBuffer
       const maybePath = (file as File & { path?: string }).path;
       if (maybePath && typeof maybePath === 'string') {
+        onProgress?.(20);
         const imported = await invoke<Asset>('import_local_asset', {
           projectId,
           kind,
@@ -174,35 +183,22 @@ export const videoApi = {
         onProgress?.(100);
         return imported;
       }
-
-      const buf = await file.arrayBuffer();
-      onProgress?.(60);
-      const uploaded = await invoke<Asset>('upload_asset_bytes', {
-        projectId,
-        kind,
-        filename: file.name,
-        contentType: file.type || (kind === 'logo' ? 'image/png' : 'video/mp4'),
-        bytes: Array.from(new Uint8Array(buf)),
-      });
-      onProgress?.(100);
-      return uploaded;
+      basePrefix = await resolveTauriLoopbackBaseUrl();
     }
 
-    // Browser HTTP Mode:
-    // Step 1: Request signed upload URL
+    // Stream binary directly to local HTTP / loopback range server (never buffer gigabytes in JS IPC)
     const { data: urlResp } = await api.post<{
       asset_id: string;
       storage_key: string;
       upload_url: string;
       headers: Record<string, string>;
-    }>(`/api/v1/projects/${projectId}/assets/upload-url`, {
+    }>(`${basePrefix}/api/v1/projects/${projectId}/assets/upload-url`, {
       kind,
       filename: file.name,
       content_type: file.type || (kind === 'logo' ? 'image/png' : 'video/mp4'),
       size_bytes: file.size,
     });
 
-    // Step 2: Upload binary directly to signed URL
     await api.put(urlResp.upload_url, file, {
       headers: {
         'Content-Type': file.type || 'application/octet-stream',
@@ -214,9 +210,8 @@ export const videoApi = {
       },
     });
 
-    // Step 3: Complete & run FFprobe verification
     const { data: completedAsset } = await api.post<Asset>(
-      `/api/v1/projects/${projectId}/assets/complete`,
+      `${basePrefix}/api/v1/projects/${projectId}/assets/complete`,
       { asset_id: urlResp.asset_id }
     );
     return completedAsset;
@@ -525,10 +520,11 @@ export const videoApi = {
     file: File,
     onProgress?: (percent: number) => void
   ): Promise<Asset> {
+    let basePrefix = '';
     if (isTauriDesktop()) {
-      onProgress?.(20);
       const maybePath = (file as File & { path?: string }).path;
       if (maybePath && typeof maybePath === 'string') {
+        onProgress?.(20);
         const imported = await invoke<Asset>('import_local_asset_to_batch_pool', {
           batchId,
           kind,
@@ -537,18 +533,7 @@ export const videoApi = {
         onProgress?.(100);
         return imported;
       }
-
-      const buf = await file.arrayBuffer();
-      onProgress?.(60);
-      const uploaded = await invoke<Asset>('upload_batch_pool_asset_bytes', {
-        batchId,
-        kind,
-        filename: file.name,
-        contentType: file.type || (kind === 'logo' ? 'image/png' : 'video/mp4'),
-        bytes: Array.from(new Uint8Array(buf)),
-      });
-      onProgress?.(100);
-      return uploaded;
+      basePrefix = await resolveTauriLoopbackBaseUrl();
     }
 
     const { data: urlResp } = await api.post<{
@@ -556,7 +541,7 @@ export const videoApi = {
       storage_key: string;
       upload_url: string;
       headers: Record<string, string>;
-    }>(`/api/v1/batches/${batchId}/assets/upload-url`, {
+    }>(`${basePrefix}/api/v1/batches/${batchId}/assets/upload-url`, {
       kind,
       filename: file.name,
       content_type: file.type || (kind === 'logo' ? 'image/png' : 'video/mp4'),
@@ -575,7 +560,7 @@ export const videoApi = {
     });
 
     const { data: completedAsset } = await api.post<Asset>(
-      `/api/v1/batches/${batchId}/assets/complete`,
+      `${basePrefix}/api/v1/batches/${batchId}/assets/complete`,
       { asset_id: urlResp.asset_id }
     );
     return completedAsset;

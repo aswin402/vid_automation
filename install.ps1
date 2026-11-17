@@ -238,6 +238,9 @@ try {
 
 # --------------- Step 4: Animated Silent Install & PATH Setup -----------------
 try {
+    Get-Process -Name "celestiavid-desktop" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 300
+
     if ($Asset.name -match '\.msi$') {
         $Proc = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$TempInstaller`" /passive /norestart" -PassThru
     } else {

@@ -303,6 +303,22 @@ impl CelestiaEngine {
         })
     }
 
+    pub fn verify_upload_target(
+        &self,
+        asset_id: &str,
+        token: Option<&str>,
+        require_token: bool,
+    ) -> AppResult<PathBuf> {
+        if require_token {
+            let tok = token.unwrap_or_default();
+            if !self.storage.verify_signed_token(asset_id, "upload", tok) {
+                return Err(AppError::forbidden("Invalid or expired upload token."));
+            }
+        }
+        let asset = self.db.get_asset(asset_id)?;
+        self.storage.resolve_path(&asset.storage_key)
+    }
+
     pub async fn write_upload_bytes(
         &self,
         asset_id: &str,
@@ -310,12 +326,7 @@ impl CelestiaEngine {
         require_token: bool,
         bytes: &[u8],
     ) -> AppResult<()> {
-        if require_token {
-            let tok = token.unwrap_or_default();
-            if !self.storage.verify_signed_token(asset_id, "upload", tok) {
-                return Err(AppError::forbidden("Invalid or expired upload token."));
-            }
-        }
+        let dest = self.verify_upload_target(asset_id, token, require_token)?;
         if bytes.is_empty() {
             return Err(AppError::validation(
                 "EMPTY_UPLOAD",
@@ -329,9 +340,6 @@ impl CelestiaEngine {
                 413,
             ));
         }
-
-        let asset = self.db.get_asset(asset_id)?;
-        let dest = self.storage.resolve_path(&asset.storage_key)?;
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }

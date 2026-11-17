@@ -352,10 +352,42 @@ fn default_whisper_model_path() -> PathBuf {
         .join("ggml-base.bin")
 }
 
+fn is_valid_ggml_model_file(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(meta) = path.metadata() else {
+        return false;
+    };
+    // ggml-base.bin is ~147.9 MB; reject truncated/corrupt downloads (< 140 MB)
+    // unless a custom model path was explicitly configured by the user.
+    let is_custom = std::env::var("CELESTIAVID_WHISPER_MODEL")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    let min_bytes = if is_custom { 1_000_000 } else { 140_000_000 };
+    if !meta.is_file() || meta.len() < min_bytes {
+        return false;
+    }
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    if f.read_exact(&mut magic).is_err() {
+        return false;
+    }
+    // Valid GGML / GGUF magic headers ("lmgg", "ggml", "ggjt", "ggmf", "GGUF")
+    matches!(
+        &magic,
+        b"lmgg" | b"ggml" | b"tjgg" | b"ggjt" | b"fmgg" | b"ggmf" | b"GGUF"
+    )
+}
+
 async fn ensure_whisper_model_cached() -> Option<PathBuf> {
     let model_path = default_whisper_model_path();
-    if model_path.is_file() && model_path.metadata().map(|m| m.len() > 1_000_000).unwrap_or(false) {
+    if is_valid_ggml_model_file(&model_path) {
         return Some(model_path);
+    }
+    if model_path.exists() {
+        warn!(path = %model_path.display(), "removing_corrupt_or_incomplete_whisper_model");
+        let _ = tokio::fs::remove_file(&model_path).await;
     }
 
     if std::env::var("CELESTIAVID_OFFLINE_TESTS").unwrap_or_default() == "1" {
@@ -369,22 +401,51 @@ async fn ensure_whisper_model_cached() -> Option<PathBuf> {
     let url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
     info!(url = url, dest = %model_path.display(), "downloading_whisper_ggml_base_model");
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .build()
+        .ok()?;
     let resp = client.get(url).send().await.ok()?;
     if !resp.status().is_success() {
         return None;
     }
+    let expected_len = resp.content_length();
 
     let tmp_path = model_path.with_extension("bin.part");
+    let _ = tokio::fs::remove_file(&tmp_path).await;
     let mut file = tokio::fs::File::create(&tmp_path).await.ok()?;
     let mut stream = resp.bytes_stream();
+    let mut written: u64 = 0;
     while let Some(chunk_res) = stream.next().await {
-        let chunk = chunk_res.ok()?;
-        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await.ok()?;
+        let Ok(chunk) = chunk_res else {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return None;
+        };
+        if tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+            .await
+            .is_err()
+        {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return None;
+        }
+        written = written.saturating_add(chunk.len() as u64);
     }
-    tokio::io::AsyncWriteExt::flush(&mut file).await.ok()?;
+    let _ = tokio::io::AsyncWriteExt::flush(&mut file).await;
     drop(file);
+
+    if let Some(exp) = expected_len {
+        if exp > 0 && written != exp {
+            warn!(expected = exp, written = written, "whisper_model_download_incomplete");
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return None;
+        }
+    }
+
     tokio::fs::rename(&tmp_path, &model_path).await.ok()?;
+    if !is_valid_ggml_model_file(&model_path) {
+        let _ = tokio::fs::remove_file(&model_path).await;
+        return None;
+    }
     Some(model_path)
 }
 
@@ -397,20 +458,28 @@ fn run_local_whisper_cpp(
 ) -> Option<TranscriptResult> {
     use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+    if !is_valid_ggml_model_file(model_path) {
+        return None;
+    }
+
     let (_, samples_i16) = read_wav_i16(audio_path)?;
     let samples_f32: Vec<f32> = samples_i16
         .into_iter()
         .map(|s| (s as f32) / 32768.0)
         .collect();
 
-    let ctx = WhisperContext::new_with_params(
-        model_path.to_str()?,
-        WhisperContextParameters::default(),
-    )
-    .ok()?;
+    let mut ctx_params = WhisperContextParameters::default();
+    ctx_params.use_gpu(false);
+    let ctx = WhisperContext::new_with_params(model_path.to_str()?, ctx_params).ok()?;
     let mut state = ctx.create_state().ok()?;
 
+    let avail_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let safe_threads = (avail_cores / 2).clamp(1, 4) as i32;
+
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    params.set_n_threads(safe_threads);
     params.set_print_special(false);
     params.set_print_progress(false);
     params.set_print_realtime(false);
@@ -504,12 +573,31 @@ pub async fn transcribe_audio_wav(
         if let Some(model_path) = ensure_whisper_model_cached().await {
             let wav_clone = audio_path.to_path_buf();
             let lang_owned = language.map(ToString::to_string);
-            let whisper_res = tokio::task::spawn_blocking(move || {
-                run_local_whisper_cpp(&model_path, &wav_clone, duration_ms, lang_owned.as_deref())
-            })
-            .await
-            .ok()
-            .flatten();
+            // Spawn a dedicated 16 MB-stack OS thread so Windows (whose default stack is 1 MB)
+            // never hits STATUS_STACK_OVERFLOW inside whisper.cpp / ggml C++ frames.
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let spawn_res = std::thread::Builder::new()
+                .name("celestiavid-whisper".into())
+                .stack_size(16 * 1024 * 1024)
+                .spawn(move || {
+                    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_local_whisper_cpp(
+                            &model_path,
+                            &wav_clone,
+                            duration_ms,
+                            lang_owned.as_deref(),
+                        )
+                    }))
+                    .ok()
+                    .flatten();
+                    let _ = tx.send(out);
+                });
+
+            let whisper_res = if spawn_res.is_ok() {
+                rx.await.ok().flatten()
+            } else {
+                None
+            };
 
             if let Some(res) = whisper_res {
                 return Ok(res);

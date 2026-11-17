@@ -27,6 +27,11 @@ fn get_capabilities(
 }
 
 #[tauri::command]
+fn get_media_server_base_url(engine: State<'_, Arc<CelestiaEngine>>) -> String {
+    engine.media_base_url()
+}
+
+#[tauri::command]
 fn list_projects(
     engine: State<'_, Arc<CelestiaEngine>>,
 ) -> Result<Vec<ProjectDetailResponse>, AppError> {
@@ -507,14 +512,59 @@ fn delete_backup(
     engine.delete_backup(&backup_id)
 }
 
+fn install_desktop_panic_logger() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let base_dir = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| {
+                    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share"))
+                })
+            })
+            .unwrap_or_else(std::env::temp_dir)
+            .join("celestiavid")
+            .join("logs");
+
+        let _ = std::fs::create_dir_all(&base_dir);
+        let log_path = base_dir.join("panic.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "=== CelestiaVid Panic ===");
+            let _ = writeln!(f, "thread: {:?}", std::thread::current().name());
+            let _ = writeln!(f, "{info}");
+        }
+        default_hook(info);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_desktop_panic_logger();
+
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("info,celestiavid_core=info")),
         )
         .try_init();
+
+    // Configure a 16 MB per-thread stack size for Tauri's Tokio runtime so Windows
+    // (whose default thread stack is 1 MB) never overflows during media/AI workloads.
+    if let Ok(rt) = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("celestiavid-tokio")
+        .thread_stack_size(16 * 1024 * 1024)
+        .build()
+    {
+        tauri::async_runtime::set(rt.handle().clone());
+        // Keep runtime alive for application lifetime
+        Box::leak(Box::new(rt));
+    }
 
     let sample_dir = {
         let cwd_sample = PathBuf::from("sample");
@@ -543,6 +593,7 @@ pub fn run() {
         .manage(engine)
         .invoke_handler(tauri::generate_handler![
             get_capabilities,
+            get_media_server_base_url,
             list_projects,
             create_project,
             create_demo_project,

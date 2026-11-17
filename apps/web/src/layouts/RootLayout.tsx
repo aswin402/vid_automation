@@ -16,7 +16,19 @@ export function RootLayout() {
       autoRaf: true,
     });
     lenis.on('scroll', ScrollTrigger.update);
+
+    // Prevent OS file drops outside dropzones from navigating Windows WebView2 away from the app
+    const blockBrowserFileNavigation = (e: DragEvent) => {
+      if (e.dataTransfer?.types?.includes('Files')) {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('dragover', blockBrowserFileNavigation);
+    window.addEventListener('drop', blockBrowserFileNavigation);
+
     return () => {
+      window.removeEventListener('dragover', blockBrowserFileNavigation);
+      window.removeEventListener('drop', blockBrowserFileNavigation);
       lenis.destroy();
     };
   }, []);

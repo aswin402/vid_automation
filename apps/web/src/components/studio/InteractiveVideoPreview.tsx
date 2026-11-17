@@ -106,6 +106,20 @@ interface WebAudioFilterGraph {
 }
 
 const mediaAudioGraphMap = new WeakMap<HTMLVideoElement, WebAudioFilterGraph>();
+let sharedAudioContext: AudioContext | null = null;
+
+function getSharedAudioContext(): AudioContext | null {
+  if (sharedAudioContext && sharedAudioContext.state !== 'closed') {
+    return sharedAudioContext;
+  }
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext: typeof AudioContext })
+      .webkitAudioContext;
+  if (!AudioCtx) return null;
+  sharedAudioContext = new AudioCtx();
+  return sharedAudioContext;
+}
 
 function getOrCreateAudioGraph(
   videoEl: HTMLVideoElement
@@ -113,12 +127,8 @@ function getOrCreateAudioGraph(
   const existing = mediaAudioGraphMap.get(videoEl);
   if (existing) return existing;
   try {
-    const AudioCtx =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext: typeof AudioContext })
-        .webkitAudioContext;
-    if (!AudioCtx) return null;
-    const ctx = new AudioCtx();
+    const ctx = getSharedAudioContext();
+    if (!ctx) return null;
     const source = ctx.createMediaElementSource(videoEl);
 
     const highpass = ctx.createBiquadFilter();
@@ -749,7 +759,9 @@ export const InteractiveVideoPreview: React.FC<InteractiveVideoPreviewProps> = (
 
     const isAudioActive = Boolean(audioCfg?.enabled && !effectiveBypassAudio);
     const existingGraph = mediaAudioGraphMap.get(vid);
-    if (!isAudioActive && !existingGraph) return;
+    // Lazily attach Web Audio filter nodes only once playback actually begins
+    // so paused video cards never open OS audio resources before Play is pressed.
+    if ((!isAudioActive || !isPlaying) && !existingGraph) return;
 
     const graph = existingGraph || getOrCreateAudioGraph(vid);
     if (!graph) return;
