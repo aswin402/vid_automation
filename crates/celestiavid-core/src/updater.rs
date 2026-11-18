@@ -30,6 +30,8 @@ struct GithubReleaseAsset {
 struct GithubReleasePayload {
     tag_name: String,
     #[serde(default)]
+    draft: bool,
+    #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     body: Option<String>,
@@ -478,6 +480,7 @@ impl CelestiaEngine {
         let resp = match client
             .get(&api_url)
             .header("Accept", "application/vnd.github+json")
+            .header("Cache-Control", "no-cache")
             .send()
             .await
         {
@@ -515,7 +518,7 @@ impl CelestiaEngine {
             )));
         }
 
-        let payload: GithubReleasePayload = resp.json().await.map_err(|e| {
+        let mut payload: GithubReleasePayload = resp.json().await.map_err(|e| {
             AppError::internal(
                 "RELEASE_PARSE_ERROR",
                 "Invalid release metadata JSON.",
@@ -523,13 +526,42 @@ impl CelestiaEngine {
             )
         })?;
 
-        let latest_version = normalize_version(&payload.tag_name);
-        let update_available = is_newer_version(&current_version, &latest_version);
-
         let target_os = std::env::var("CELESTIAVID_TARGET_OS")
             .ok()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| std::env::consts::OS.to_string());
+
+        // If the latest release is mid-CI and lacks an asset for this OS yet, fall back to the newest release with an OS asset
+        if !is_custom_manifest
+            && select_platform_asset(&payload.assets, &target_os, false)
+                .0
+                .is_none()
+        {
+            let recent_url = format!("https://api.github.com/repos/{repo}/releases?per_page=8");
+            if let Ok(list_resp) = client
+                .get(&recent_url)
+                .header("Accept", "application/vnd.github+json")
+                .header("Cache-Control", "no-cache")
+                .send()
+                .await
+            {
+                if list_resp.status().is_success() {
+                    if let Ok(releases) = list_resp.json::<Vec<GithubReleasePayload>>().await {
+                        if let Some(best) = releases.into_iter().find(|r| {
+                            !r.draft
+                                && select_platform_asset(&r.assets, &target_os, false)
+                                    .0
+                                    .is_some()
+                        }) {
+                            payload = best;
+                        }
+                    }
+                }
+            }
+        }
+
+        let latest_version = normalize_version(&payload.tag_name);
+        let update_available = is_newer_version(&current_version, &latest_version);
 
         let (matched_asset, install_strategy) =
             select_platform_asset(&payload.assets, &target_os, is_custom_manifest);
@@ -902,28 +934,13 @@ impl CelestiaEngine {
                 let pid = std::process::id();
                 let current_exe = std::env::current_exe().ok();
                 let script_path = self.updates_dir().join("apply-windows-update.ps1");
-                let exe_relaunch = current_exe
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().replace('\'', "''"))
-                    .unwrap_or_default();
-                let installer_escaped = installer_path.to_string_lossy().replace('\'', "''");
                 let is_msi = state.install_strategy.as_deref() == Some("windows_msi");
-
-                let ps_script = if is_msi {
-                    format!(
-                        "$ErrorActionPreference = 'SilentlyContinue'\n\
-                         Wait-Process -Id {pid} -Timeout 15\n\
-                         Start-Process -FilePath 'msiexec.exe' -ArgumentList '/i \"{installer_escaped}\" /passive /norestart' -Wait\n\
-                         if ('{exe_relaunch}' -ne '' -and (Test-Path '{exe_relaunch}')) {{ Start-Process -FilePath '{exe_relaunch}' }}\n"
-                    )
-                } else {
-                    format!(
-                        "$ErrorActionPreference = 'SilentlyContinue'\n\
-                         Wait-Process -Id {pid} -Timeout 15\n\
-                         Start-Process -FilePath '{installer_escaped}' -ArgumentList '/S' -Wait\n\
-                         if ('{exe_relaunch}' -ne '' -and (Test-Path '{exe_relaunch}')) {{ Start-Process -FilePath '{exe_relaunch}' }}\n"
-                    )
-                };
+                let ps_script = build_windows_update_script(
+                    pid,
+                    &installer_path,
+                    current_exe.as_deref(),
+                    is_msi,
+                );
 
                 std::fs::write(&script_path, ps_script)?;
                 std::process::Command::new("powershell.exe")
@@ -963,6 +980,97 @@ impl CelestiaEngine {
 
         Ok(())
     }
+}
+
+#[allow(dead_code)]
+fn build_windows_update_script(
+    pid: u32,
+    installer_path: &Path,
+    current_exe: Option<&Path>,
+    is_msi: bool,
+) -> String {
+    let exe_relaunch = current_exe
+        .map(|p| p.to_string_lossy().replace('\'', "''"))
+        .unwrap_or_default();
+    let installer_escaped = installer_path.to_string_lossy().replace('\'', "''");
+
+    let mut script = format!(
+        "$ErrorActionPreference = 'SilentlyContinue'\n\
+         Wait-Process -Id {pid} -Timeout 20\n\
+         Start-Sleep -Milliseconds 600\n\
+         Get-Process -Name 'celestiavid-desktop', 'CelestiaVid' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue\n\
+         try {{\n\
+           $Wv = Get-CimInstance Win32_Process -Filter \"Name = 'msedgewebview2.exe'\" -ErrorAction SilentlyContinue\n\
+           foreach ($P in $Wv) {{ if ($P.CommandLine -match '(?i)celestiavid') {{ Stop-Process -Id $P.ProcessId -Force -ErrorAction SilentlyContinue }} }}\n\
+         }} catch {{}}\n\
+         for ($i = 0; $i -lt 24; $i++) {{\n\
+           if (-not (Get-Process -Name 'celestiavid-desktop', 'CelestiaVid' -ErrorAction SilentlyContinue)) {{ break }}\n\
+           Start-Sleep -Milliseconds 250\n\
+         }}\n\
+         foreach ($Root in @(\n\
+           (Join-Path $env:LOCALAPPDATA 'com.celestialabs.celestiavid\\EBWebView\\Default'),\n\
+           (Join-Path $env:APPDATA 'com.celestialabs.celestiavid\\EBWebView\\Default'),\n\
+           (Join-Path $env:LOCALAPPDATA 'CelestiaVid\\EBWebView\\Default')\n\
+         )) {{\n\
+           if (Test-Path $Root) {{\n\
+             foreach ($Sub in @('Cache', 'Code Cache', 'GPUCache', 'DawnCache')) {{\n\
+               $T = Join-Path $Root $Sub\n\
+               if (Test-Path $T) {{ Remove-Item -Path $T -Recurse -Force -ErrorAction SilentlyContinue }}\n\
+             }}\n\
+           }}\n\
+         }}\n"
+    );
+
+    if is_msi {
+        script.push_str(&format!(
+            "Start-Process -FilePath 'msiexec.exe' -ArgumentList '/i \"{installer_escaped}\" /passive /norestart' -Wait\n\
+             if ('{exe_relaunch}' -ne '' -and (Test-Path '{exe_relaunch}')) {{ Start-Process -FilePath '{exe_relaunch}' }}\n"
+        ));
+    } else {
+        script.push_str(&format!(
+            "$TargetDir = Join-Path $env:LOCALAPPDATA 'CelestiaVid'\n\
+             foreach ($SubKey in @('Software\\com.celestialabs.celestiavid\\CelestiaVid', 'Software\\CelestiaLabs\\CelestiaVid')) {{\n\
+               try {{ $K = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($SubKey); if ($K) {{ $K.SetValue('', $TargetDir, [Microsoft.Win32.RegistryValueKind]::String); $K.Close() }} }} catch {{}}\n\
+             }}\n\
+             if (Test-Path $TargetDir) {{\n\
+               foreach ($OldName in @('celestiavid-desktop.exe', 'CelestiaVid.exe')) {{\n\
+                 $OldPath = Join-Path $TargetDir $OldName\n\
+                 if (Test-Path $OldPath) {{\n\
+                   for ($r = 0; $r -lt 12; $r++) {{\n\
+                     Remove-Item -Path $OldPath -Force -ErrorAction SilentlyContinue\n\
+                     if (-not (Test-Path $OldPath)) {{ break }}\n\
+                     Start-Sleep -Milliseconds 300\n\
+                   }}\n\
+                 }}\n\
+               }}\n\
+             }}\n\
+             $P = Start-Process -FilePath '{installer_escaped}' -ArgumentList \"/S /D=$TargetDir\" -Wait -PassThru\n\
+             $NewExe = Get-ChildItem -Path $TargetDir -Filter '*.exe' -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -notmatch '(?i)uninstall|ffmpeg|ffprobe' }} | Select-Object -First 1\n\
+             if (-not $NewExe -or $P.ExitCode -ne 0) {{\n\
+               Start-Process -FilePath '{installer_escaped}' -ArgumentList \"/P /D=$TargetDir\" -Wait\n\
+               $NewExe = Get-ChildItem -Path $TargetDir -Filter '*.exe' -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -notmatch '(?i)uninstall|ffmpeg|ffprobe' }} | Select-Object -First 1\n\
+             }}\n\
+             if ($NewExe) {{\n\
+               try {{\n\
+                 $Wsh = New-Object -ComObject WScript.Shell\n\
+                 foreach ($Lnk in @(\n\
+                   (Join-Path ([Environment]::GetFolderPath('Programs')) 'CelestiaVid.lnk'),\n\
+                   (Join-Path ([Environment]::GetFolderPath('Desktop')) 'CelestiaVid.lnk'),\n\
+                   (Join-Path $env:APPDATA 'Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar\\CelestiaVid.lnk')\n\
+                 )) {{\n\
+                   if ($Lnk -and ((Test-Path (Split-Path $Lnk -Parent)) -or (Test-Path $Lnk))) {{\n\
+                     $Sc = $Wsh.CreateShortcut($Lnk); $Sc.TargetPath = $NewExe.FullName; $Sc.WorkingDirectory = $NewExe.DirectoryName; $Sc.IconLocation = \"$($NewExe.FullName),0\"; $Sc.Save()\n\
+                   }}\n\
+                 }}\n\
+               }} catch {{}}\n\
+               Start-Process -FilePath $NewExe.FullName -WorkingDirectory $NewExe.DirectoryName\n\
+             }} elseif ('{exe_relaunch}' -ne '' -and (Test-Path '{exe_relaunch}')) {{\n\
+               Start-Process -FilePath '{exe_relaunch}'\n\
+             }}\n"
+        ));
+    }
+
+    script
 }
 
 fn apply_platform_installer(
@@ -1163,7 +1271,8 @@ fn apply_platform_installer(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_newer_version, normalize_version};
+    use super::{build_windows_update_script, is_newer_version, normalize_version};
+    use std::path::Path;
 
     #[test]
     fn test_semver_comparison() {
@@ -1175,5 +1284,21 @@ mod tests {
         assert!(!is_newer_version("0.2.1", "v0.2.0"));
         assert!(is_newer_version("0.2.2-rc.1", "0.2.2"));
         assert!(!is_newer_version("0.2.2", "0.2.2-beta.1"));
+    }
+
+    #[test]
+    fn test_windows_update_script_clears_cache_and_launches_new_nsis_binary() {
+        let script = build_windows_update_script(
+            4242,
+            Path::new(r"C:\Users\demo\AppData\Local\celestiavid\updates\v0.2.5\CelestiaVid_0.2.5_x64-setup.exe"),
+            Some(Path::new(r"C:\Program Files\CelestiaVid\celestiavid-desktop.exe")),
+            false,
+        );
+        assert!(script.contains("Wait-Process -Id 4242"));
+        assert!(script.contains("msedgewebview2.exe"));
+        assert!(script.contains("EBWebView\\Default"));
+        assert!(script.contains("/S /D=$TargetDir"));
+        assert!(script.contains("/P /D=$TargetDir"));
+        assert!(script.contains("Start-Process -FilePath $NewExe.FullName"));
     }
 }

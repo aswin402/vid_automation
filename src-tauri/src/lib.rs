@@ -542,9 +542,87 @@ fn install_desktop_panic_logger() {
     }));
 }
 
+fn purge_stale_webview_cache_on_version_change() {
+    let current_ver = env!("CARGO_PKG_VERSION");
+    let data_dir = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| {
+                std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share"))
+            })
+        })
+        .unwrap_or_else(std::env::temp_dir)
+        .join("celestiavid");
+
+    let _ = std::fs::create_dir_all(&data_dir);
+    let stamp_file = data_dir.join("last_ui_version.txt");
+    let previous_ver = std::fs::read_to_string(&stamp_file)
+        .ok()
+        .map(|s| s.trim().to_string());
+
+    if previous_ver.as_deref() == Some(current_ver) {
+        return;
+    }
+
+    // Purge persistent Chromium WebView2 HTTP & JS bytecode caches on Windows whenever
+    // the app binary version changes so stale cached UI bundles can never be served.
+    let mut wv_roots = Vec::new();
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        wv_roots.push(
+            local_app_data
+                .join("com.celestialabs.celestiavid")
+                .join("EBWebView")
+                .join("Default"),
+        );
+        wv_roots.push(
+            local_app_data
+                .join("CelestiaVid")
+                .join("EBWebView")
+                .join("Default"),
+        );
+    }
+    if let Some(roaming_app_data) = std::env::var_os("APPDATA").map(PathBuf::from) {
+        wv_roots.push(
+            roaming_app_data
+                .join("com.celestialabs.celestiavid")
+                .join("EBWebView")
+                .join("Default"),
+        );
+    }
+
+    let cache_subdirs: &[&[&str]] = &[
+        &["Cache"],
+        &["Code Cache"],
+        &["GPUCache"],
+        &["DawnCache"],
+        &["DawnGraphiteCache"],
+        &["DawnWebGPUCache"],
+        &["Service Worker", "CacheStorage"],
+        &["Service Worker", "ScriptCache"],
+    ];
+
+    for root in wv_roots {
+        if !root.is_dir() {
+            continue;
+        }
+        for segments in cache_subdirs {
+            let mut target = root.clone();
+            for seg in *segments {
+                target.push(seg);
+            }
+            if target.exists() {
+                let _ = std::fs::remove_dir_all(&target);
+            }
+        }
+    }
+
+    let _ = std::fs::write(&stamp_file, current_ver);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_desktop_panic_logger();
+    purge_stale_webview_cache_on_version_change();
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(

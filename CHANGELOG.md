@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [0.2.5] - 2026-11-18
+
+### Fixed — Windows Update Replacement, Stale Installation Cleanup & WebView2 Cache Invalidation
+- **Clean Windows Update Replacement (`install.ps1`, `install.cmd`, `crates/celestiavid-core/src/updater.rs`)**:
+  - Terminates lingering `celestiavid-desktop`, `CelestiaVid`, and child `msedgewebview2.exe` file-lock holders before running NSIS setup, removes legacy side-by-side per-machine MSI copies (`C:\Program Files\CelestiaVid`), deletes previous per-user `.exe` binaries before installing, pins NSIS `/D=%LOCALAPPDATA%\CelestiaVid` with passive `/P` fallback, verifies the installed `.exe` PE `ProductVersion`, refreshes Start Menu / Desktop / Taskbar `.lnk` shortcuts, and relaunches the verified binary directly.
+- **Automatic WebView2 UI Cache Invalidation (`src-tauri/src/lib.rs`, `apps/web/index.html`, `install.ps1`)**:
+  - Purges persistent Windows Chromium `EBWebView\Default` (`Cache`, `Code Cache`, `GPUCache`, `DawnCache`) whenever `CARGO_PKG_VERSION` changes at startup or during install/update, and adds `Cache-Control: no-cache, no-store, must-revalidate` HTML headers so stale frontend bundles can never load after an update.
+- **Atomic Cross-Platform Release Publishing (`.github/workflows/release-desktop.yml`)**:
+  - Publishes Windows (`.exe`, `.msi`), Linux (`.deb`, `.AppImage`), and macOS (`.dmg`) installers together in a single final `publish-release` job so GitHub `Latest` never points to a partial mid-build release.
+
+---
+
 ## [0.2.4] - 2026-11-17
 
 ### Fixed — Windows Desktop Stability & Crash Prevention

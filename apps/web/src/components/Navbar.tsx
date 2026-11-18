@@ -316,7 +316,7 @@ export const Navbar: React.FC = () => {
             ) : (
               <HintTooltip
                 label="Updates & Data Backups"
-                detail={`Version v${updateCheck?.current_version ?? '0.2.4'} · Manage snapshots`}
+                detail={`Version v${updateCheck?.current_version ?? '0.2.5'} · Manage snapshots`}
                 side="bottom"
               >
                 <Button
@@ -327,8 +327,8 @@ export const Navbar: React.FC = () => {
                   className="text-muted-foreground hover:text-foreground font-mono text-[11px]"
                 >
                   <ShieldCheck className="h-3.5 w-3.5 text-emerald-500" />
-                  <span className="hidden xl:inline">
-                    v{updateCheck?.current_version ?? '0.2.4'}
+                  <span className="hidden sm:inline">
+                    v{updateCheck?.current_version ?? '0.2.5'}
                   </span>
                 </Button>
               </HintTooltip>

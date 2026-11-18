@@ -12,6 +12,7 @@
 #   $env:CELESTIAVID_FORMAT               "exe" (default NSIS per-user setup) or "msi"
 #   $env:CELESTIAVID_UPDATE               "1" to run in explicit update mode
 #   $env:CELESTIAVID_SKIP_BACKUP          "1" to skip pre-install app data snapshot
+#   $env:CELESTIAVID_NO_LAUNCH            "1" to skip launching CelestiaVid after install
 #   $env:CELESTIAVID_DRY_RUN              "1" to preview without installing
 #   $env:CELESTIAVID_UPDATE_MANIFEST_URL  Custom release manifest URL override
 # ==============================================================================
@@ -30,6 +31,7 @@ $Version = if ($env:CELESTIAVID_VERSION) { $env:CELESTIAVID_VERSION } else { "la
 $Format = if ($env:CELESTIAVID_FORMAT) { $env:CELESTIAVID_FORMAT.ToLower() } else { "exe" }
 $IsUpdate = ($env:CELESTIAVID_UPDATE -eq "1") -or ($args -contains "--update") -or ($args -contains "-Update")
 $SkipBackup = ($env:CELESTIAVID_SKIP_BACKUP -eq "1") -or ($args -contains "--skip-backup")
+$NoLaunch = ($env:CELESTIAVID_NO_LAUNCH -eq "1") -or ($args -contains "--no-launch") -or ($args -contains "-NoLaunch")
 $DryRun = ($env:CELESTIAVID_DRY_RUN -eq "1") -or ($args -contains "--dry-run") -or ($args -contains "-DryRun")
 
 $IsInteractive = [Environment]::UserInteractive -and -not [Console]::IsOutputRedirected
@@ -78,6 +80,116 @@ function Format-Megabytes([long]$Bytes) {
     return ("{0:N1} MB" -f ($Bytes / 1MB))
 }
 
+function Select-WindowsAsset($Assets, [string]$PreferredFormat) {
+    if (-not $Assets) { return $null }
+    if ($PreferredFormat -eq "msi") {
+        return ($Assets | Where-Object { $_.name -match '\.msi$' } | Select-Object -First 1)
+    }
+    $ExeAsset = $Assets | Where-Object { $_.name -match 'setup\.exe$' -or $_.name -match '\.exe$' } | Select-Object -First 1
+    if ($ExeAsset) { return $ExeAsset }
+    return ($Assets | Where-Object { $_.name -match '\.msi$' } | Select-Object -First 1)
+}
+
+function Normalize-SemverPrefix([string]$RawVersion) {
+    if (-not $RawVersion) { return "" }
+    $Trimmed = $RawVersion.Trim().TrimStart('v', 'V')
+    if ($Trimmed -match '^(\d+\.\d+\.\d+)') {
+        return $Matches[1]
+    }
+    return $Trimmed
+}
+
+function Get-ExeVersionString([string]$ExePath) {
+    if (-not (Test-Path $ExePath)) { return "" }
+    try {
+        $Info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($ExePath)
+        if ($Info.ProductVersion -and $Info.ProductVersion.Trim() -ne "") {
+            return (Normalize-SemverPrefix $Info.ProductVersion)
+        }
+        if ($Info.FileVersion -and $Info.FileVersion.Trim() -ne "") {
+            return (Normalize-SemverPrefix $Info.FileVersion)
+        }
+    } catch {}
+    return ""
+}
+
+function Stop-AllCelestiaVidProcesses {
+    # 1. Stop main CelestiaVid binaries by name
+    $Names = @("celestiavid-desktop", "CelestiaVid", "celestiavid")
+    foreach ($N in $Names) {
+        Get-Process -Name $N -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
+
+    # 2. Stop any process executing out of a CelestiaVid install directory
+    try {
+        Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                $PPath = $_.Path
+                if ($PPath -and ($PPath -match '(?i)\\CelestiaVid\\' -or $PPath -match '(?i)\\com\.celestialabs\.celestiavid\\')) {
+                    Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+                }
+            } catch {}
+        }
+    } catch {}
+
+    # 3. Stop lingering WebView2 children bound to CelestiaVid user data dir so file locks release
+    try {
+        $WvProcs = $null
+        if (Get-Command "Get-CimInstance" -ErrorAction SilentlyContinue) {
+            $WvProcs = Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" -ErrorAction SilentlyContinue
+        } elseif (Get-Command "Get-WmiObject" -ErrorAction SilentlyContinue) {
+            $WvProcs = Get-WmiObject Win32_Process -Filter "Name = 'msedgewebview2.exe'" -ErrorAction SilentlyContinue
+        }
+        if ($WvProcs) {
+            foreach ($Wv in $WvProcs) {
+                if ($Wv.CommandLine -and ($Wv.CommandLine -match '(?i)celestiavid')) {
+                    Stop-Process -Id $Wv.ProcessId -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    } catch {}
+
+    # 4. Wait up to 8 seconds for OS handles to fully close
+    for ($i = 0; $i -lt 32; $i++) {
+        $StillRunning = Get-Process -Name "celestiavid-desktop", "CelestiaVid" -ErrorAction SilentlyContinue
+        if (-not $StillRunning) { break }
+        Start-Sleep -Milliseconds 250
+    }
+}
+
+function Clear-CelestiaVidWebViewCache {
+    $WvRoots = @(
+        (Join-Path $env:LOCALAPPDATA "com.celestialabs.celestiavid\EBWebView\Default"),
+        (Join-Path $env:APPDATA "com.celestialabs.celestiavid\EBWebView\Default"),
+        (Join-Path $env:LOCALAPPDATA "CelestiaVid\EBWebView\Default")
+    )
+    $CacheSubdirs = @(
+        "Cache",
+        "Code Cache",
+        "GPUCache",
+        "DawnCache",
+        "DawnGraphiteCache",
+        "DawnWebGPUCache",
+        "Service Worker\CacheStorage",
+        "Service Worker\ScriptCache"
+    )
+    $ClearedAny = $false
+    foreach ($Root in $WvRoots) {
+        if (Test-Path $Root) {
+            foreach ($Sub in $CacheSubdirs) {
+                $Target = Join-Path $Root $Sub
+                if (Test-Path $Target) {
+                    try {
+                        Remove-Item -Path $Target -Recurse -Force -ErrorAction SilentlyContinue
+                        $ClearedAny = $true
+                    } catch {}
+                }
+            }
+        }
+    }
+    return $ClearedAny
+}
+
 $ModeLabel = if ($IsUpdate) { "Updater  " } else { "Installer" }
 
 Write-Host ""
@@ -104,10 +216,30 @@ if ($IsInteractive) {
     Write-Host -NoNewline "  $($SpinnerFrames[0]) Checking release feed ($Version)..." -ForegroundColor Gray
 }
 $Headers = @{
-    "Accept"     = "application/vnd.github+json"
-    "User-Agent" = "CelestiaVid-Windows-Installer"
+    "Accept"        = "application/vnd.github+json"
+    "User-Agent"    = "CelestiaVid-Windows-Installer"
+    "Cache-Control" = "no-cache"
+    "Pragma"        = "no-cache"
 }
 $Release = Invoke-RestMethod -Uri $ApiUrl -Headers $Headers -Method Get
+$Asset = Select-WindowsAsset -Assets $Release.assets -PreferredFormat $Format
+
+# If latest release is mid-CI-publish and Windows asset is not attached yet, pick newest release with a Windows installer
+if (-not $Asset -and $Version -eq "latest" -and -not $env:CELESTIAVID_UPDATE_MANIFEST_URL) {
+    try {
+        $RecentReleases = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases?per_page=8" -Headers $Headers -Method Get
+        foreach ($Cand in $RecentReleases) {
+            if ($Cand.draft) { continue }
+            $CandAsset = Select-WindowsAsset -Assets $Cand.assets -PreferredFormat $Format
+            if ($CandAsset) {
+                $Release = $Cand
+                $Asset = $CandAsset
+                break
+            }
+        }
+    } catch {}
+}
+
 if ($IsInteractive) {
     Write-Host "`r$(' ' * 76)`r" -NoNewline
 }
@@ -117,17 +249,8 @@ if (-not $TagName) {
     Write-StepErr "Failed to resolve release tag from $ApiUrl"
     throw "Unable to resolve release tag."
 }
+$CleanVer = Normalize-SemverPrefix $TagName
 Write-StepOk "Resolved target release $TagName"
-
-$Asset = $null
-if ($Format -eq "msi") {
-    $Asset = $Release.assets | Where-Object { $_.name -match '\.msi$' } | Select-Object -First 1
-} else {
-    $Asset = $Release.assets | Where-Object { $_.name -match 'setup\.exe$' -or $_.name -match '\.exe$' } | Select-Object -First 1
-    if (-not $Asset) {
-        $Asset = $Release.assets | Where-Object { $_.name -match '\.msi$' } | Select-Object -First 1
-    }
-}
 
 if (-not $Asset) {
     Write-StepErr "No Windows installer (.exe or .msi) found on release $TagName."
@@ -153,7 +276,6 @@ if ($SkipBackup) {
     $BackupSummary = "Skipped (--skip-backup)"
     Write-StepInfo "Skipped app data backup"
 } elseif (Test-Path $DbFile) {
-    $CleanVer = $TagName.TrimStart('v', 'V')
     $Stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
     $BackupId = "backup-cli-$CleanVer-$Stamp"
     $BackupDir = Join-Path (Join-Path $DataDir "backups") $BackupId
@@ -205,7 +327,7 @@ if ($SkipBackup) {
 }
 
 $DownloadUrl = $Asset.browser_download_url
-$TempInstaller = Join-Path $env:TEMP "CelestiaVid-$($TagName.TrimStart('v'))-$($Asset.name)"
+$TempInstaller = Join-Path $env:TEMP "CelestiaVid-$CleanVer-$($Asset.name)"
 $PartInstaller = "$TempInstaller.part"
 
 if ($DryRun) {
@@ -376,15 +498,105 @@ try {
     Unblock-File -Path $TempInstaller -ErrorAction SilentlyContinue
 } catch {}
 
-# --------------- Step 4: Animated Silent Install & PATH Setup -----------------
+# ------ Step 4: Clean Previous Builds, Install & Verify Binary Version --------
+$TargetInstallDir = Join-Path $env:LOCALAPPDATA "CelestiaVid"
+$PriorInstallDirs = New-Object System.Collections.Generic.List[string]
+$PriorInstallDirs.Add($TargetInstallDir)
+$PriorInstallDirs.Add((Join-Path $env:LOCALAPPDATA "Programs\CelestiaVid"))
+
 try {
-    Get-Process -Name "celestiavid-desktop", "CelestiaVid" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 400
+    Stop-AllCelestiaVidProcesses
+
+    # Scan Uninstall Registry for prior MSI or custom-directory installations
+    $UninstallRoots = @(
+        @{ Hive = "HKCU"; Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" },
+        @{ Hive = "HKLM"; Path = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" },
+        @{ Hive = "HKLM"; Path = "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" }
+    )
+    foreach ($RootInfo in $UninstallRoots) {
+        try {
+            $Items = Get-ItemProperty -Path $RootInfo.Path -ErrorAction SilentlyContinue | Where-Object {
+                $_.DisplayName -like "*CelestiaVid*" -or $_.PSChildName -like "*CelestiaVid*"
+            }
+            foreach ($Item in $Items) {
+                if ($Item.InstallLocation -and (Test-Path $Item.InstallLocation)) {
+                    $CleanLoc = $Item.InstallLocation.TrimEnd('\')
+                    if (-not $PriorInstallDirs.Contains($CleanLoc)) {
+                        $PriorInstallDirs.Add($CleanLoc)
+                    }
+                }
+                # If switching/updating to NSIS (.exe) and a legacy MSI per-machine install exists, remove the MSI so Program Files doesn't shadow per-user!
+                $IsMsiEntry = ($Item.WindowsInstaller -eq 1) -or ($Item.PSChildName -match '^\{[0-9A-Fa-f\-]+\}$')
+                if ($IsMsiEntry -and ($Asset.name -notmatch '\.msi$')) {
+                    Write-StepInfo "Removing legacy MSI installation ($($Item.DisplayName) $($Item.DisplayVersion))..."
+                    try {
+                        if ($RootInfo.Hive -eq "HKLM") {
+                            Start-Process -FilePath "msiexec.exe" -ArgumentList "/x $($Item.PSChildName) /passive /norestart" -Verb RunAs -Wait -ErrorAction Stop | Out-Null
+                        } else {
+                            Start-Process -FilePath "msiexec.exe" -ArgumentList "/x $($Item.PSChildName) /passive /norestart" -Wait -ErrorAction Stop | Out-Null
+                        }
+                        Write-StepOk "Removed legacy MSI copy so old shortcuts cannot shadow $TagName"
+                    } catch {
+                        Write-StepWarn "Could not auto-remove legacy MSI in Program Files (approve UAC or uninstall old MSI in Settings > Apps if needed)."
+                    }
+                }
+            }
+        } catch {}
+    }
+
+    # Pin NSIS InstallDirRegKey to %LOCALAPPDATA%\CelestiaVid so silent setup always installs to a single predictable location
+    if ($Asset.name -notmatch '\.msi$') {
+        foreach ($SubKeyName in @(
+            "Software\com.celestialabs.celestiavid\CelestiaVid",
+            "Software\CelestiaLabs\CelestiaVid"
+        )) {
+            try {
+                $RegKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($SubKeyName)
+                if ($RegKey) {
+                    $PrevDir = $RegKey.GetValue("")
+                    if ($PrevDir -and (Test-Path ([string]$PrevDir))) {
+                        $CleanPrev = ([string]$PrevDir).TrimEnd('\')
+                        if (-not $PriorInstallDirs.Contains($CleanPrev)) {
+                            $PriorInstallDirs.Add($CleanPrev)
+                        }
+                    }
+                    $RegKey.SetValue("", $TargetInstallDir, [Microsoft.Win32.RegistryValueKind]::String)
+                    $RegKey.Close()
+                }
+            } catch {}
+        }
+
+        # Explicitly delete old per-user CelestiaVid executables BEFORE NSIS runs so silent setup can never skip overwriting
+        foreach ($OldDir in $PriorInstallDirs) {
+            if ($OldDir -match '(?i)\\Program Files') { continue }
+            if (-not (Test-Path $OldDir)) { continue }
+            foreach ($OldExeName in @("celestiavid-desktop.exe", "CelestiaVid.exe")) {
+                $OldExePath = Join-Path $OldDir $OldExeName
+                if (Test-Path $OldExePath) {
+                    for ($r = 0; $r -lt 15; $r++) {
+                        try {
+                            Remove-Item -Path $OldExePath -Force -ErrorAction Stop
+                            break
+                        } catch {
+                            Stop-AllCelestiaVidProcesses
+                            Start-Sleep -Milliseconds 350
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    # Clear persistent WebView2 HTTP & JS bytecode cache so fresh UI bundle always loads
+    if (Clear-CelestiaVidWebViewCache) {
+        Write-StepOk "Cleared stale WebView2 UI cache"
+    }
 
     if ($Asset.name -match '\.msi$') {
         $Proc = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$TempInstaller`" /passive /norestart" -PassThru
     } else {
-        $Proc = Start-Process -FilePath $TempInstaller -ArgumentList "/S" -PassThru
+        # NSIS /D= must be unquoted and the final parameter on the command line
+        $Proc = Start-Process -FilePath $TempInstaller -ArgumentList "/S /D=$TargetInstallDir" -PassThru
     }
 
     $SpinIdx = 0
@@ -392,7 +604,7 @@ try {
         if ($IsInteractive) {
             $F = $SpinnerFrames[$SpinIdx % $SpinnerFrames.Count]
             $SpinIdx++
-            Write-Host "`r  $F Installing CelestiaVid $TagName (per-user setup)...   " -NoNewline -ForegroundColor Gray
+            Write-Host "`r  $F Installing CelestiaVid $TagName...                    " -NoNewline -ForegroundColor Gray
         }
         Start-Sleep -Milliseconds 85
     }
@@ -400,11 +612,57 @@ try {
         Write-Host "`r$(' ' * 76)`r" -NoNewline
     }
 
-    if ($Proc.ExitCode -ne 0) {
+    # Locate installed binary and verify its embedded PE ProductVersion matches $CleanVer
+    $SearchDirs = @(
+        $TargetInstallDir,
+        (Join-Path $env:LOCALAPPDATA "Programs\CelestiaVid"),
+        (Join-Path $env:ProgramFiles "CelestiaVid")
+    )
+    $VerifiedExe = $null
+    foreach ($Dir in $SearchDirs) {
+        if (-not (Test-Path $Dir)) { continue }
+        $CandExe = Get-ChildItem -Path $Dir -Filter "*.exe" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch '(?i)uninstall|ffmpeg|ffprobe' } |
+            Select-Object -First 1
+        if ($CandExe) {
+            $FoundVer = Get-ExeVersionString $CandExe.FullName
+            if ($FoundVer -eq $CleanVer) {
+                $VerifiedExe = $CandExe
+                break
+            }
+        }
+    }
+
+    # Fallback: if silent /S aborted or version mismatched, run passive (/P) installer and re-verify
+    if (($Proc.ExitCode -ne 0 -or -not $VerifiedExe) -and ($Asset.name -notmatch '\.msi$')) {
+        Write-StepWarn "Silent setup needs passive retry to replace binary - running passive updater..."
+        Stop-AllCelestiaVidProcesses
+        $RetryProc = Start-Process -FilePath $TempInstaller -ArgumentList "/P /D=$TargetInstallDir" -Wait -PassThru
+        foreach ($Dir in $SearchDirs) {
+            if (-not (Test-Path $Dir)) { continue }
+            $CandExe = Get-ChildItem -Path $Dir -Filter "*.exe" -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -notmatch '(?i)uninstall|ffmpeg|ffprobe' } |
+                Select-Object -First 1
+            if ($CandExe) {
+                $FoundVer = Get-ExeVersionString $CandExe.FullName
+                if ($FoundVer -eq $CleanVer -or $RetryProc.ExitCode -eq 0) {
+                    $VerifiedExe = $CandExe
+                    break
+                }
+            }
+        }
+        if (-not $VerifiedExe) {
+            Write-StepErr "Installer exited with code $($RetryProc.ExitCode) and binary v$CleanVer was not found."
+            throw "Installer failed to place CelestiaVid v$CleanVer in $TargetInstallDir."
+        }
+    } elseif ($Proc.ExitCode -ne 0) {
         Write-StepErr "Installer exited with code $($Proc.ExitCode)"
         throw "Installer failed with exit code $($Proc.ExitCode)"
     }
-    Write-StepOk "Installed CelestiaVid $TagName"
+
+    $ActualVerLabel = if ($VerifiedExe) { Get-ExeVersionString $VerifiedExe.FullName } else { $CleanVer }
+    if (-not $ActualVerLabel) { $ActualVerLabel = $CleanVer }
+    Write-StepOk "Installed & verified CelestiaVid v$ActualVerLabel"
 } finally {
     if (Test-Path $TempInstaller) {
         Remove-Item $TempInstaller -Force -ErrorAction SilentlyContinue
@@ -412,26 +670,78 @@ try {
 }
 
 $CandidateDirs = @(
-    (Join-Path $env:LOCALAPPDATA "CelestiaVid"),
-    (Join-Path $env:LOCALAPPDATA "Programs\CelestiaVid")
+    $TargetInstallDir,
+    (Join-Path $env:LOCALAPPDATA "Programs\CelestiaVid"),
+    (Join-Path $env:ProgramFiles "CelestiaVid")
 )
-$InstalledDir = $CandidateDirs | Where-Object { Test-Path $_ } | Select-Object -First 1
-$LaunchDisplay = "Start Menu -> CelestiaVid"
+$InstalledDir = if ($VerifiedExe) {
+    $VerifiedExe.DirectoryName
+} else {
+    $CandidateDirs | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+$ExeFile = if ($VerifiedExe) {
+    $VerifiedExe
+} elseif ($InstalledDir) {
+    Get-ChildItem -Path $InstalledDir -Filter "*.exe" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notmatch '(?i)uninstall|ffmpeg|ffprobe' } |
+        Select-Object -First 1
+} else {
+    $null
+}
+$LaunchDisplay = if ($ExeFile) { $ExeFile.Name } else { "Start Menu -> CelestiaVid" }
 
 if ($InstalledDir) {
-    $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if (-not $UserPath) { $UserPath = "" }
-    $PathEntries = $UserPath -split ";" | Where-Object { $_ -ne "" }
-    if ($PathEntries -notcontains $InstalledDir) {
-        $NewUserPath = if ($UserPath) { "$UserPath;$InstalledDir" } else { $InstalledDir }
-        [Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
-        $env:Path = "$env:Path;$InstalledDir"
-        Write-StepOk "Added $InstalledDir to User PATH"
-    }
-    $ExeFile = Get-ChildItem -Path $InstalledDir -Filter "*.exe" | Where-Object { $_.Name -notmatch "uninstall" } | Select-Object -First 1
-    if ($ExeFile) {
-        $LaunchDisplay = $ExeFile.Name
-    }
+    # Place $InstalledDir at the front of User PATH and prune stale CelestiaVid entries
+    try {
+        $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        if (-not $UserPath) { $UserPath = "" }
+        $KeptEntries = $UserPath -split ";" | Where-Object {
+            $_ -ne "" -and $_ -ne $InstalledDir -and -not ($_ -match '(?i)\\CelestiaVid$' -and -not (Test-Path $_))
+        }
+        $NewUserPath = if ($KeptEntries) {
+            "$InstalledDir;" + ($KeptEntries -join ";")
+        } else {
+            $InstalledDir
+        }
+        if ($NewUserPath -ne $UserPath) {
+            [Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
+            Write-StepOk "Updated User PATH -> $InstalledDir"
+        }
+        $env:Path = "$InstalledDir;$env:Path"
+    } catch {}
+}
+
+# Refresh Start Menu, Desktop & Taskbar shortcuts so every icon points directly to the new binary
+if ($ExeFile) {
+    try {
+        $WshShell = New-Object -ComObject WScript.Shell
+        $StartMenuPrograms = [Environment]::GetFolderPath("Programs")
+        $DesktopDir = [Environment]::GetFolderPath("Desktop")
+        $TaskbarPin = Join-Path $env:APPDATA "Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\CelestiaVid.lnk"
+
+        $ShortcutPaths = New-Object System.Collections.Generic.List[string]
+        if ($StartMenuPrograms) {
+            $ShortcutPaths.Add((Join-Path $StartMenuPrograms "CelestiaVid.lnk"))
+        }
+        if ($DesktopDir) {
+            $ShortcutPaths.Add((Join-Path $DesktopDir "CelestiaVid.lnk"))
+        }
+        if (Test-Path $TaskbarPin) {
+            $ShortcutPaths.Add($TaskbarPin)
+        }
+
+        foreach ($LnkPath in $ShortcutPaths) {
+            try {
+                $Sc = $WshShell.CreateShortcut($LnkPath)
+                $Sc.TargetPath = $ExeFile.FullName
+                $Sc.WorkingDirectory = $ExeFile.DirectoryName
+                $Sc.Description = "CelestiaVid Studio - AI Branded Video Automation"
+                $Sc.IconLocation = "$($ExeFile.FullName),0"
+                $Sc.Save()
+            } catch {}
+        }
+        Write-StepOk "Refreshed Desktop & Start Menu shortcuts -> v$CleanVer"
+    } catch {}
 }
 
 $LocText = if ($InstalledDir) { $InstalledDir } else { "%LOCALAPPDATA%\CelestiaVid" }
@@ -453,3 +763,10 @@ Write-Host ("{0,-43}" -f $LaunchDisplay) -ForegroundColor Cyan -NoNewline
 Write-Host " $BoxVert" -ForegroundColor DarkGray
 Write-Host $BoxBot -ForegroundColor DarkGray
 Write-Host ""
+
+if ($ExeFile -and -not $NoLaunch) {
+    try {
+        Write-StepInfo "Launching CelestiaVid Studio $TagName..."
+        Start-Process -FilePath $ExeFile.FullName -WorkingDirectory $ExeFile.DirectoryName | Out-Null
+    } catch {}
+}

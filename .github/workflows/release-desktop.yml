@@ -143,16 +143,6 @@ jobs:
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/msi/*.msi
 
-      - name: Publish Windows Installers to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.prepare.outputs.tag }}
-          name: CelestiaVid ${{ needs.prepare.outputs.tag }}
-          make_latest: "true"
-          files: |
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/msi/*.msi
-
   build-linux:
     name: Linux x64 (.deb + .AppImage)
     needs: prepare
@@ -223,16 +213,6 @@ jobs:
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/appimage/*.AppImage
 
-      - name: Publish Linux Installers to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.prepare.outputs.tag }}
-          name: CelestiaVid ${{ needs.prepare.outputs.tag }}
-          make_latest: "true"
-          files: |
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/appimage/*.AppImage
-
   build-macos:
     name: macOS Apple Silicon (.dmg)
     needs: prepare
@@ -274,10 +254,33 @@ jobs:
           name: CelestiaVid-macOS-arm64-Installer
           path: src-tauri/target/release/bundle/dmg/*.dmg
 
-      - name: Publish macOS Installer to GitHub Release
+  publish-release:
+    name: Publish Atomic GitHub Release
+    needs:
+      - prepare
+      - build-windows
+      - build-linux
+      - build-macos
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Desktop Installer Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Flatten Release Assets
+        run: |
+          mkdir -p dist-release
+          find release-artifacts -type f \( -name "*.exe" -o -name "*.msi" -o -name "*.deb" -o -name "*.AppImage" -o -name "*.dmg" \) -exec cp -v {} dist-release/ \;
+          ls -lh dist-release/
+
+      - name: Publish All Installers Atomically to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: CelestiaVid ${{ needs.prepare.outputs.tag }}
           make_latest: "true"
-          files: src-tauri/target/release/bundle/dmg/*.dmg
+          generate_release_notes: true
+          files: dist-release/*
