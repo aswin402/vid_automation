@@ -1,5 +1,5 @@
-﻿# ==============================================================================
-# CelestiaVid Studio — Minimal Windows Terminal Installer & Updater (PowerShell)
+# ==============================================================================
+# CelestiaVid Studio - Minimal Windows Terminal Installer & Updater (PowerShell)
 #
 # PowerShell One-Liner:
 #   irm https://raw.githubusercontent.com/aswin402/vid_automation/main/install.ps1 | iex
@@ -19,6 +19,9 @@
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls13
+} catch {}
+try {
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 } catch {}
 
@@ -30,23 +33,44 @@ $SkipBackup = ($env:CELESTIAVID_SKIP_BACKUP -eq "1") -or ($args -contains "--ski
 $DryRun = ($env:CELESTIAVID_DRY_RUN -eq "1") -or ($args -contains "--dry-run") -or ($args -contains "-DryRun")
 
 $IsInteractive = [Environment]::UserInteractive -and -not [Console]::IsOutputRedirected
-$SpinnerFrames = @("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+# Construct Unicode TUI glyphs via codepoints so script source stays 100% pure 7-bit ASCII (zero BOM)
+$SymOk      = [string][char]0x2713
+$SymBullet  = [string][char]0x2022
+$SymErr     = [string][char]0x2717
+$SymDiamond = [string][char]0x25C6
+$BarFillCh  = [string][char]0x2501
+$BarEmptyCh = [string][char]0x2500
+$BoxVert    = [string][char]0x2502
+$BoxTop     = "  " + [char]0x256D + ([string][char]0x2500 * 56) + [char]0x256E
+$BoxBot     = "  " + [char]0x2570 + ([string][char]0x2500 * 56) + [char]0x256F
+$MidDot     = [string][char]0x00B7
+$SpinnerFrames = @(
+    0x280B, 0x2819, 0x2839, 0x2838, 0x283C,
+    0x2834, 0x2826, 0x2827, 0x2807, 0x280F
+) | ForEach-Object { [string][char]$_ }
 
 function Write-StepOk([string]$Message) {
     Write-Host "  " -NoNewline
-    Write-Host "✓" -ForegroundColor Green -NoNewline
+    Write-Host $SymOk -ForegroundColor Green -NoNewline
     Write-Host " $Message"
 }
 
 function Write-StepInfo([string]$Message) {
     Write-Host "  " -NoNewline
-    Write-Host "•" -ForegroundColor Cyan -NoNewline
+    Write-Host $SymBullet -ForegroundColor Cyan -NoNewline
+    Write-Host " $Message"
+}
+
+function Write-StepWarn([string]$Message) {
+    Write-Host "  " -NoNewline
+    Write-Host "!" -ForegroundColor Yellow -NoNewline
     Write-Host " $Message"
 }
 
 function Write-StepErr([string]$Message) {
     Write-Host "  " -NoNewline
-    Write-Host "✗" -ForegroundColor Red -NoNewline
+    Write-Host $SymErr -ForegroundColor Red -NoNewline
     Write-Host " $Message"
 }
 
@@ -57,14 +81,14 @@ function Format-Megabytes([long]$Bytes) {
 $ModeLabel = if ($IsUpdate) { "Updater  " } else { "Installer" }
 
 Write-Host ""
-Write-Host "  ╭────────────────────────────────────────────────────────╮" -ForegroundColor DarkGray
-Write-Host "  │  " -ForegroundColor DarkGray -NoNewline
-Write-Host "◆ " -ForegroundColor Magenta -NoNewline
+Write-Host $BoxTop -ForegroundColor DarkGray
+Write-Host ("  $BoxVert  ") -ForegroundColor DarkGray -NoNewline
+Write-Host "$SymDiamond " -ForegroundColor Magenta -NoNewline
 Write-Host "CelestiaVid Studio                     " -ForegroundColor White -NoNewline
 Write-Host "$ModeLabel" -ForegroundColor Cyan -NoNewline
-Write-Host "    │" -ForegroundColor DarkGray
-Write-Host "  │    AI Branded Video Automation · Windows (x64)         │" -ForegroundColor DarkGray
-Write-Host "  ╰────────────────────────────────────────────────────────╯" -ForegroundColor DarkGray
+Write-Host "    $BoxVert" -ForegroundColor DarkGray
+Write-Host "  $BoxVert    AI Branded Video Automation $MidDot Windows (x64)         $BoxVert" -ForegroundColor DarkGray
+Write-Host $BoxBot -ForegroundColor DarkGray
 Write-Host ""
 
 # ---------------------- Step 1: Resolve Release Metadata ----------------------
@@ -77,7 +101,7 @@ $ApiUrl = if ($env:CELESTIAVID_UPDATE_MANIFEST_URL) {
 }
 
 if ($IsInteractive) {
-    Write-Host -NoNewline "  ⠋ Checking release feed ($Version)..." -ForegroundColor Gray
+    Write-Host -NoNewline "  $($SpinnerFrames[0]) Checking release feed ($Version)..." -ForegroundColor Gray
 }
 $Headers = @{
     "Accept"     = "application/vnd.github+json"
@@ -85,7 +109,7 @@ $Headers = @{
 }
 $Release = Invoke-RestMethod -Uri $ApiUrl -Headers $Headers -Method Get
 if ($IsInteractive) {
-    Write-Host "`r$(' ' * 72)`r" -NoNewline
+    Write-Host "`r$(' ' * 76)`r" -NoNewline
 }
 
 $TagName = $Release.tag_name
@@ -108,6 +132,12 @@ if ($Format -eq "msi") {
 if (-not $Asset) {
     Write-StepErr "No Windows installer (.exe or .msi) found on release $TagName."
     throw "No Windows asset found on release $TagName."
+}
+
+$ExpectedBytes = if ($Asset.size) { [long]$Asset.size } else { 0L }
+$ExpectedSha256 = $null
+if ($Asset.PSObject.Properties.Name -contains "digest" -and $Asset.digest -match '^sha256:([0-9a-fA-F]{64})$') {
+    $ExpectedSha256 = $Matches[1].ToLowerInvariant()
 }
 
 # ------------------- Step 2: Automatic App Data Backup ------------------------
@@ -133,7 +163,7 @@ if ($SkipBackup) {
         Write-StepInfo "[Dry Run] Would snapshot existing app data -> $BackupDir"
     } else {
         if ($IsInteractive) {
-            Write-Host -NoNewline "  ⠙ Backing up existing CelestiaVid projects & database..." -ForegroundColor Gray
+            Write-Host -NoNewline "  $($SpinnerFrames[1]) Backing up existing CelestiaVid projects & database..." -ForegroundColor Gray
         }
         New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
         Copy-Item -Path $DbFile -Destination (Join-Path $BackupDir "celestiavid.db") -Force
@@ -167,7 +197,7 @@ if ($SkipBackup) {
         Set-Content -Path (Join-Path $BackupDir "backup_manifest.json") -Value $Manifest -Encoding UTF8
 
         if ($IsInteractive) {
-            Write-Host "`r$(' ' * 76)`r" -NoNewline
+            Write-Host "`r$(' ' * 78)`r" -NoNewline
         }
         $BackupSummary = $BackupId
         Write-StepOk "Backed up app data ($BackupId)"
@@ -175,71 +205,181 @@ if ($SkipBackup) {
 }
 
 $DownloadUrl = $Asset.browser_download_url
-$TempInstaller = Join-Path $env:TEMP $Asset.name
+$TempInstaller = Join-Path $env:TEMP "CelestiaVid-$($TagName.TrimStart('v'))-$($Asset.name)"
+$PartInstaller = "$TempInstaller.part"
 
 if ($DryRun) {
-    Write-StepInfo "[Dry Run] Would download & install $($Asset.name) from $DownloadUrl"
+    Write-StepInfo "[Dry Run] Would download & verify $($Asset.name) ($(Format-Megabytes $ExpectedBytes)) from $DownloadUrl"
     return
 }
 
-# --------------- Step 3: Streamed Download with Minimal Bar -------------------
+# -------- Step 3: Resumable Download + Size & SHA-256 Verification ------------
+if (Test-Path $TempInstaller) {
+    Remove-Item $TempInstaller -Force -ErrorAction SilentlyContinue
+}
+if (Test-Path $PartInstaller) {
+    Remove-Item $PartInstaller -Force -ErrorAction SilentlyContinue
+}
+
 Add-Type -AssemblyName System.Net.Http
-$HttpClient = New-Object System.Net.Http.HttpClient
+$Handler = New-Object System.Net.Http.HttpClientHandler
+$Handler.AllowAutoRedirect = $true
+$HttpClient = New-Object System.Net.Http.HttpClient($Handler)
+$HttpClient.Timeout = [TimeSpan]::FromMinutes(30)
 $HttpClient.DefaultRequestHeaders.Add("User-Agent", "CelestiaVid-Windows-Installer")
 
+$MaxAttempts = 8
+$Attempt = 0
+$Downloaded = 0L
+
 try {
-    $Response = $HttpClient.GetAsync($DownloadUrl, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
-    $Response.EnsureSuccessStatusCode() | Out-Null
-    $TotalBytes = if ($Response.Content.Headers.ContentLength) { [long]$Response.Content.Headers.ContentLength } else { [long]$Asset.size }
-
-    $NetStream = $Response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
-    $FileStream = [System.IO.File]::Create($TempInstaller)
-    $Buffer = New-Object byte[] 65536
-    $Downloaded = [long]0
-    $FrameIdx = 0
-    $BarWidth = 22
-    $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-
-    try {
-        while (($Read = $NetStream.Read($Buffer, 0, $Buffer.Length)) -gt 0) {
-            $FileStream.Write($Buffer, 0, $Read)
-            $Downloaded += $Read
-
-            if ($IsInteractive -and $Stopwatch.ElapsedMilliseconds -ge 65) {
-                $Stopwatch.Restart()
-                $Frame = $SpinnerFrames[$FrameIdx % $SpinnerFrames.Count]
-                $FrameIdx++
-
-                if ($TotalBytes -gt 0) {
-                    $Pct = [Math]::Min(100, [int](($Downloaded * 100) / $TotalBytes))
-                    $Filled = [int](($Pct * $BarWidth) / 100)
-                    $Empty = $BarWidth - $Filled
-                    $Bar = ("━" * $Filled) + ("─" * $Empty)
-                    $Line = "  $Frame Downloading installer  $Bar  $($Pct.ToString().PadLeft(3))% ($(Format-Megabytes $Downloaded) / $(Format-Megabytes $TotalBytes))"
-                    Write-Host "`r$($Line.PadRight(78))" -NoNewline -ForegroundColor Cyan
-                } else {
-                    $Line = "  $Frame Downloading installer  $(Format-Megabytes $Downloaded)"
-                    Write-Host "`r$($Line.PadRight(78))" -NoNewline -ForegroundColor Cyan
-                }
-            }
+    while ($Attempt -lt $MaxAttempts) {
+        $Attempt++
+        $ExistingBytes = if (Test-Path $PartInstaller) { (Get-Item $PartInstaller).Length } else { 0L }
+        if ($ExpectedBytes -gt 0 -and $ExistingBytes -ge $ExpectedBytes) {
+            $Downloaded = $ExistingBytes
+            break
         }
-    } finally {
-        $FileStream.Dispose()
-        $NetStream.Dispose()
-    }
 
-    if ($IsInteractive) {
-        Write-Host "`r$(' ' * 80)`r" -NoNewline
+        try {
+            $ReqMsg = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, $DownloadUrl)
+            if ($ExistingBytes -gt 0) {
+                $ReqMsg.Headers.Range = New-Object System.Net.Http.Headers.RangeHeaderValue($ExistingBytes, $null)
+            }
+
+            $Response = $HttpClient.SendAsync($ReqMsg, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+            $StatusCode = [int]$Response.StatusCode
+
+            if ($ExistingBytes -gt 0 -and $StatusCode -eq 206) {
+                $FileMode = [System.IO.FileMode]::Append
+                $Downloaded = $ExistingBytes
+            } elseif ($StatusCode -ge 200 -and $StatusCode -lt 300) {
+                $FileMode = [System.IO.FileMode]::Create
+                $Downloaded = 0L
+            } else {
+                $Response.Dispose()
+                throw "HTTP status $StatusCode"
+            }
+
+            $TotalBytes = if ($ExpectedBytes -gt 0) {
+                $ExpectedBytes
+            } elseif ($Response.Content.Headers.ContentLength) {
+                $Downloaded + [long]$Response.Content.Headers.ContentLength
+            } else {
+                0L
+            }
+
+            $NetStream = $Response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+            $FileStream = New-Object System.IO.FileStream($PartInstaller, $FileMode, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None, 65536)
+            $Buffer = New-Object byte[] 65536
+            $FrameIdx = 0
+            $BarWidth = 22
+            $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+            try {
+                while (($Read = $NetStream.Read($Buffer, 0, $Buffer.Length)) -gt 0) {
+                    $FileStream.Write($Buffer, 0, $Read)
+                    $Downloaded += $Read
+
+                    if ($IsInteractive -and $Stopwatch.ElapsedMilliseconds -ge 65) {
+                        $Stopwatch.Restart()
+                        $Frame = $SpinnerFrames[$FrameIdx % $SpinnerFrames.Count]
+                        $FrameIdx++
+
+                        if ($TotalBytes -gt 0) {
+                            $Pct = [Math]::Min(100, [int](($Downloaded * 100) / $TotalBytes))
+                            $Filled = [int](($Pct * $BarWidth) / 100)
+                            $Empty = $BarWidth - $Filled
+                            $Bar = ($BarFillCh * $Filled) + ($BarEmptyCh * $Empty)
+                            $Line = "  $Frame Downloading installer  $Bar  $($Pct.ToString().PadLeft(3))% ($(Format-Megabytes $Downloaded) / $(Format-Megabytes $TotalBytes))"
+                            Write-Host "`r$($Line.PadRight(79))" -NoNewline -ForegroundColor Cyan
+                        } else {
+                            $Line = "  $Frame Downloading installer  $(Format-Megabytes $Downloaded)"
+                            Write-Host "`r$($Line.PadRight(79))" -NoNewline -ForegroundColor Cyan
+                        }
+                    }
+                }
+                $FileStream.Flush()
+            } finally {
+                $FileStream.Dispose()
+                $NetStream.Dispose()
+                $Response.Dispose()
+            }
+        } catch {
+            # Transient socket drop or timeout - loop will resume via HTTP Range
+        }
+
+        $CurrentBytes = if (Test-Path $PartInstaller) { (Get-Item $PartInstaller).Length } else { 0L }
+        $Downloaded = $CurrentBytes
+
+        if ($ExpectedBytes -le 0 -and $CurrentBytes -gt 0) {
+            break
+        }
+        if ($ExpectedBytes -gt 0 -and $CurrentBytes -ge $ExpectedBytes) {
+            break
+        }
+
+        if ($Attempt -lt $MaxAttempts) {
+            if ($IsInteractive) {
+                Write-Host "`r$(' ' * 80)`r" -NoNewline
+                Write-StepWarn "Connection interrupted at $(Format-Megabytes $CurrentBytes) / $(Format-Megabytes $ExpectedBytes) - resuming ($Attempt/$MaxAttempts)..."
+            }
+            Start-Sleep -Seconds 2
+        }
     }
-    Write-StepOk "Downloaded $($Asset.name) ($(Format-Megabytes $Downloaded))"
 } finally {
     $HttpClient.Dispose()
+    $Handler.Dispose()
 }
+
+# Built-in Windows curl.exe fallback if .NET HttpClient stream was still incomplete
+$CurrentBytes = if (Test-Path $PartInstaller) { (Get-Item $PartInstaller).Length } else { 0L }
+if (($ExpectedBytes -gt 0 -and $CurrentBytes -lt $ExpectedBytes) -or $CurrentBytes -eq 0) {
+    $CurlCmd = Get-Command "curl.exe" -ErrorAction SilentlyContinue
+    if ($CurlCmd) {
+        if ($IsInteractive) {
+            Write-Host "`r$(' ' * 80)`r" -NoNewline
+        }
+        Write-StepInfo "Completing download via Windows curl.exe..."
+        & $CurlCmd.Source -fL --retry 5 --retry-delay 2 -C - -o "$PartInstaller" "$DownloadUrl"
+        $CurrentBytes = if (Test-Path $PartInstaller) { (Get-Item $PartInstaller).Length } else { 0L }
+        $Downloaded = $CurrentBytes
+    }
+}
+
+if ($IsInteractive) {
+    Write-Host "`r$(' ' * 80)`r" -NoNewline
+}
+
+if ($ExpectedBytes -gt 0 -and $Downloaded -ne $ExpectedBytes) {
+    if (Test-Path $PartInstaller) {
+        Remove-Item $PartInstaller -Force -ErrorAction SilentlyContinue
+    }
+    Write-StepErr "Incomplete download ($(Format-Megabytes $Downloaded) received, expected $(Format-Megabytes $ExpectedBytes))."
+    throw "Installer download was incomplete ($Downloaded / $ExpectedBytes bytes). Please check your network and re-run."
+}
+
+Move-Item -Path $PartInstaller -Destination $TempInstaller -Force
+Write-StepOk "Downloaded $($Asset.name) ($(Format-Megabytes $Downloaded))"
+
+if ($ExpectedSha256) {
+    $ActualSha256 = (Get-FileHash -Path $TempInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($ActualSha256 -ne $ExpectedSha256) {
+        Remove-Item $TempInstaller -Force -ErrorAction SilentlyContinue
+        Write-StepErr "SHA-256 checksum mismatch (expected $ExpectedSha256, got $ActualSha256)."
+        throw "Downloaded installer failed SHA-256 integrity verification."
+    }
+    Write-StepOk "Verified SHA-256 package integrity"
+}
+
+try {
+    Unblock-File -Path $TempInstaller -ErrorAction SilentlyContinue
+} catch {}
 
 # --------------- Step 4: Animated Silent Install & PATH Setup -----------------
 try {
-    Get-Process -Name "celestiavid-desktop" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 300
+    Get-Process -Name "celestiavid-desktop", "CelestiaVid" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 400
 
     if ($Asset.name -match '\.msi$') {
         $Proc = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$TempInstaller`" /passive /norestart" -PassThru
@@ -300,16 +440,16 @@ $BakText = $BackupSummary
 if ($BakText.Length -gt 42) { $BakText = $BakText.Substring(0, 42) }
 
 Write-Host ""
-Write-Host "  ╭────────────────────────────────────────────────────────╮" -ForegroundColor DarkGray
-Write-Host "  │  " -ForegroundColor DarkGray -NoNewline
-Write-Host "✓ " -ForegroundColor Green -NoNewline
+Write-Host $BoxTop -ForegroundColor DarkGray
+Write-Host ("  $BoxVert  ") -ForegroundColor DarkGray -NoNewline
+Write-Host "$SymOk " -ForegroundColor Green -NoNewline
 Write-Host ("CelestiaVid {0,-10} is ready                    " -f $TagName) -ForegroundColor White -NoNewline
-Write-Host "│" -ForegroundColor DarkGray
-Write-Host "  │                                                        │" -ForegroundColor DarkGray
-Write-Host ("  │  Location  {0,-43} │" -f $LocText) -ForegroundColor Gray
-Write-Host ("  │  Backup    {0,-43} │" -f $BakText) -ForegroundColor Gray
-Write-Host "  │  Launch    " -ForegroundColor Gray -NoNewline
+Write-Host $BoxVert -ForegroundColor DarkGray
+Write-Host "  $BoxVert                                                        $BoxVert" -ForegroundColor DarkGray
+Write-Host ("  $BoxVert  Location  {0,-43} $BoxVert" -f $LocText) -ForegroundColor Gray
+Write-Host ("  $BoxVert  Backup    {0,-43} $BoxVert" -f $BakText) -ForegroundColor Gray
+Write-Host "  $BoxVert  Launch    " -ForegroundColor Gray -NoNewline
 Write-Host ("{0,-43}" -f $LaunchDisplay) -ForegroundColor Cyan -NoNewline
-Write-Host " │" -ForegroundColor DarkGray
-Write-Host "  ╰────────────────────────────────────────────────────────╯" -ForegroundColor DarkGray
+Write-Host " $BoxVert" -ForegroundColor DarkGray
+Write-Host $BoxBot -ForegroundColor DarkGray
 Write-Host ""

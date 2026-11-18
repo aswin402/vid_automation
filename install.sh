@@ -189,16 +189,21 @@ download_with_progress() {
   fi
 
   if [[ "${IS_TTY}" -eq 0 ]]; then
-    curl -fsSL -H "User-Agent: CelestiaVid-Installer" "${url}" -o "${part_file}"
+    curl -fsSL --retry 5 --retry-delay 2 -H "User-Agent: CelestiaVid-Installer" "${url}" -o "${part_file}"
     mv "${part_file}" "${dest}"
     local final_sz
     final_sz="$(wc -c < "${dest}" | tr -d '[:space:]')"
+    if [[ "${expected_bytes}" -gt 0 && "${final_sz}" -ne "${expected_bytes}" ]]; then
+      rm -f "${dest}"
+      ui_step_err "Incomplete download (${final_sz} / ${expected_bytes} bytes)"
+      return 1
+    fi
     ui_step_ok "Downloaded ${label} ($(format_mb "${final_sz}"))"
     return 0
   fi
 
   hide_cursor
-  curl -fsSL -H "User-Agent: CelestiaVid-Installer" "${url}" -o "${part_file}" 2>"${err_file}" &
+  curl -fsSL --retry 5 --retry-delay 2 -H "User-Agent: CelestiaVid-Installer" "${url}" -o "${part_file}" 2>"${err_file}" &
   local pid=$!
   local idx=0
   local bar_width=22
